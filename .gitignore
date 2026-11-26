@@ -1,0 +1,5 @@
+/target
+/referencia
+/privado
+.ruff_cache/
+__pycache__/
