@@ -351,12 +351,21 @@ unsafe extern "system" fn poner_rect(this: *mut c_void, r: *const RECT) -> i32 {
         v.rect.set(unsafe { *r });
         // El Explorador espera a que vuelva cada cambio de tamaño mientras se arrastra el borde: se vuelve ya y la ventana
         // se coloca después, con el último tamaño, cuando este hilo no tiene nada más que atender (un reloj llega el
-        // último). Así no espera a que RichEdit vuelva a colocar el texto, y los pasos seguidos se juntan en uno.
+        // último). Así no espera a que RichEdit vuelva a colocar el texto, y los pasos seguidos se juntan en uno. Si
+        // colocarlo es lento (un .md de 1 MB, 100 ms o más), el siguiente paso esperaría a que acabe: entonces se coloca
+        // solo cuando el borde se para un momento.
         let h = v.ventana.get();
         if !h.is_null() {
             TAMANO.with(|t| {
-                let (_, reloj) = t.get();
-                let reloj = if reloj != 0 { reloj } else { unsafe { SetTimer(std::ptr::null_mut(), 0, 0, Some(poner_tamano)) } };
+                let (_, mut reloj) = t.get();
+                if reloj != 0 && LENTO.with(Cell::get) {
+                    unsafe { KillTimer(std::ptr::null_mut(), reloj) };
+                    reloj = 0;
+                }
+                if reloj == 0 {
+                    let espera = if LENTO.with(Cell::get) { PARADO_MS } else { 0 };
+                    reloj = unsafe { SetTimer(std::ptr::null_mut(), 0, espera, Some(poner_tamano)) };
+                }
                 t.set((Some((h, v.rect.get())), reloj));
             });
         }
@@ -379,6 +388,10 @@ pub fn al_explorador(m: &MSG) -> bool {
 }
 
 thread_local!(static TAMANO: Cell<(Option<(HWND, RECT)>, usize)> = const { Cell::new((None, 0)) });
+// Si colocar el texto tarda más que LENTO_MS (al cargarlo o al cambiar de tamaño la última vez).
+thread_local!(static LENTO: Cell<bool> = const { Cell::new(false) });
+const LENTO_MS: u128 = 30;
+const PARADO_MS: u32 = 150;
 
 unsafe extern "system" fn poner_tamano(_: HWND, _: u32, id: usize, _: u32) {
     unsafe { KillTimer(std::ptr::null_mut(), id) };
@@ -386,7 +399,9 @@ unsafe extern "system" fn poner_tamano(_: HWND, _: u32, id: usize, _: u32) {
     if let Some((h, r)) = pendiente {
         unsafe {
             if IsWindow(h) != 0 {
+                let t0 = std::time::Instant::now();
                 MoveWindow(h, r.left, r.top, r.right - r.left, r.bottom - r.top, 1);
+                LENTO.with(|x| x.set(t0.elapsed().as_millis() > LENTO_MS));
             }
         }
     }
@@ -420,6 +435,7 @@ unsafe extern "system" fn ensenar(this: *mut c_void) -> i32 {
             Some((_, e)) => e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"),
             None => v.md,
         };
+        let t0 = std::time::Instant::now();
         let mut l = fichero::decodificar(&bytes);
         if binario(&l) {
             l = fichero::decodificar(t().no_es_texto.as_bytes());
@@ -431,6 +447,7 @@ unsafe extern "system" fn ensenar(this: *mut c_void) -> i32 {
             }
             ventana::vista_cargar(l, md);
         }
+        LENTO.with(|x| x.set(t0.elapsed().as_millis() > LENTO_MS));
         // Después de cargar: antes se vería un momento el archivo anterior con el nombre del nuevo.
         unsafe { ShowWindow(h, SW_SHOWNA) };
         // Sonda de L5 (1.3), una vez por proceso y después de volver al Explorador: se quita al hacer la edición.
