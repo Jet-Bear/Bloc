@@ -622,6 +622,16 @@ fn congelar(doc: Doc, si: bool) {
     }
 }
 
+/// Añade texto llano al final, sin mover la selección ni lo que se ve. Como texto llano también si empieza por «{\rtf».
+pub fn anadir(h: HWND, t: &[u16]) {
+    quieto(h, || {
+        let n = largo(h);
+        seleccionar(h, n, n);
+        let b: Vec<u8> = t.iter().flat_map(|c| c.to_le_bytes()).collect();
+        meter(h, &b, SF_TEXT | SF_UNICODE | SFF_SELECTION);
+    });
+}
+
 /// Mete RTF en lugar de la selección.
 pub fn meter_rtf(h: HWND, rtf: &[u8]) {
     meter(h, rtf, SF_RTF | SFF_SELECTION);

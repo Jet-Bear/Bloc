@@ -407,11 +407,47 @@ unsafe extern "system" fn poner_tamano(_: HWND, _: u32, id: usize, _: u32) {
     }
 }
 
+// Lo que falta por poner de un texto largo y dónde va.
+thread_local!(static RESTO: RefCell<(Vec<u16>, usize)> = const { RefCell::new((Vec::new(), 0)) });
+const TROZO: usize = 64 << 10;
+
+/// Un trozo más, acabado en un salto, y otro reloj si queda. Un reloj llega cuando no hay nada más: los cambios de
+/// tamaño y las teclas pasan antes.
+unsafe extern "system" fn poner_resto(_: HWND, _: u32, id: usize, _: u32) {
+    unsafe { KillTimer(std::ptr::null_mut(), id) };
+    let trozo = RESTO.with(|r| {
+        let (t, desde) = &mut *r.borrow_mut();
+        let fin = if t.len() - *desde > TROZO {
+            t[*desde..*desde + TROZO].iter().rposition(|&c| c == 13).map_or(*desde + TROZO, |i| *desde + i + 1)
+        } else {
+            t.len()
+        };
+        let trozo = t[*desde..fin].to_vec();
+        *desde = fin;
+        trozo
+    });
+    if trozo.is_empty() {
+        return;
+    }
+    ventana::vista_anadir(&trozo);
+    if RESTO.with(|r| r.borrow().1 < r.borrow().0.len()) {
+        unsafe { SetTimer(std::ptr::null_mut(), 0, 0, Some(poner_resto)) };
+    } else {
+        parar_resto();
+    }
+}
+
+/// Otro archivo o ninguno: lo que faltaba del anterior ya no se pone (el reloj que quede no encuentra nada).
+fn parar_resto() {
+    RESTO.with(|r| *r.borrow_mut() = (Vec::new(), 0));
+}
+
 unsafe extern "system" fn ensenar(this: *mut c_void) -> i32 {
     hecho(|| {
         let v = vista(this, 0);
         // El flujo se suelta en cuanto se ha leído: el archivo se puede mover o borrar mientras se ve.
         let Some(flujo) = v.flujo.borrow_mut().take() else { return E_FAIL };
+        parar_resto();
         let (bytes, nombre) = leer(&flujo);
         drop(flujo);
         let r = v.rect.get();
@@ -440,14 +476,30 @@ unsafe extern "system" fn ensenar(this: *mut c_void) -> i32 {
         if binario(&l) {
             l = fichero::decodificar(t().no_es_texto.as_bytes());
             ventana::vista_cargar(l, false);
-        } else {
-            if md && l.texto.len() > TOPE_MD {
+        } else if md {
+            if l.texto.len() > TOPE_MD {
                 let corte = l.texto[..TOPE_MD].iter().rposition(|&c| c == 13).unwrap_or(TOPE_MD);
                 l.texto.truncate(corte);
             }
-            ventana::vista_cargar(l, md);
+            ventana::vista_cargar(l, true);
+        } else {
+            // Poner 1 MB en RichEdit cuesta 140 ms, y el Explorador espera a que vuelva: el principio ahora y el resto a
+            // trozos cuando el hilo está libre.
+            let resto = if l.texto.len() > TROZO {
+                let corte = l.texto[..TROZO].iter().rposition(|&c| c == 13).map_or(TROZO, |i| i + 1);
+                l.texto.split_off(corte)
+            } else {
+                Vec::new()
+            };
+            ventana::vista_cargar(l, false);
+            if !resto.is_empty() {
+                RESTO.with(|r| *r.borrow_mut() = (resto, 0));
+                unsafe { SetTimer(std::ptr::null_mut(), 0, 0, Some(poner_resto)) };
+            }
         }
-        LENTO.with(|x| x.set(t0.elapsed().as_millis() > LENTO_MS));
+        // Con un resto por poner, el texto entero será largo: también lento de colocar al cambiar de tamaño.
+        let grande = RESTO.with(|r| !r.borrow().0.is_empty());
+        LENTO.with(|x| x.set(grande || t0.elapsed().as_millis() > LENTO_MS));
         // Después de cargar: antes se vería un momento el archivo anterior con el nombre del nuevo.
         unsafe { ShowWindow(h, SW_SHOWNA) };
         // Sonda de L5 (1.3), una vez por proceso y después de volver al Explorador: se quita al hacer la edición.
@@ -467,6 +519,7 @@ unsafe extern "system" fn descargar(this: *mut c_void) -> i32 {
     hecho(|| {
         let v = vista(this, 0);
         v.flujo.borrow_mut().take();
+        parar_resto();
         let h = v.ventana.get();
         if !h.is_null() {
             ventana::vista_parar();

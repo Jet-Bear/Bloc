@@ -387,6 +387,13 @@ pub fn vista_cargar(l: fichero::Leido, md: bool) {
     cargar_como(l.texto, None, l.cod, l.saltos, l.nulos, md);
 }
 
+/// Lo que falta de un texto largo de la vista previa, al final y sin deshacer.
+pub fn vista_anadir(t: &[u16]) {
+    let ed = app().ed.get();
+    editor::deshacer_nativo(ed, false);
+    editor::anadir(ed, t);
+}
+
 pub fn ejecutar(archivo: Option<OsString>, instalado: bool) -> i32 {
     unsafe {
         OleInitialize(std::ptr::null());

@@ -55,6 +55,7 @@ u32.CreateWindowExW.restype = w.HWND
 u32.CreateWindowExW.argtypes = [w.DWORD, w.LPCWSTR, w.LPCWSTR, w.DWORD, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                                 w.HWND, w.HANDLE, w.HANDLE, ctypes.c_void_p]
 u32.GetDC.restype = g32.CreateCompatibleDC.restype = w.HDC
+u32.SendMessageW.argtypes, u32.SendMessageW.restype = [w.HWND, w.UINT, w.WPARAM, w.LPARAM], w.LPARAM
 u32.GetDC.argtypes = [w.HWND]
 u32.ReleaseDC.argtypes = [w.HWND, w.HDC]
 u32.RedrawWindow.argtypes = [w.HWND, ctypes.c_void_p, ctypes.c_void_p, w.UINT]
@@ -182,6 +183,59 @@ def tamano():
     k32.WaitForSingleObject(pi.hProcess, 5000)
 
 
+def texto_grande():
+    """M0 (1.3.4): un .txt de casi 1 MB (el tope de la vista) sale enseguida (el principio) y el resto llega a trozos sin hacer esperar a los
+    cambios de tamaño, hasta quedar entero."""
+    lineas = "".join("Línea %d de un registro largo, con algo de texto para que ocupe.\r\n" % i for i in range(14000))
+    lineas += "FIN DEL ARCHIVO"
+    with open(os.path.join(caja, "grande.txt"), "w", encoding="utf-8", newline="") as f:
+        f.write(lineas)
+    si = SI(); si.cb = ctypes.sizeof(SI); si.lpDesktop = ESC; pi = PI()
+    k32.CreateProcessW(None, ctypes.create_unicode_buffer('"%s" -Embedding' % exe), None, None, False, 0, None, None, ctypes.byref(si), ctypes.byref(pi))
+    time.sleep(1.5)
+    host = u32.CreateWindowExW(0, "STATIC", "vista", 0x10000000 | 0x02000000, 0, 0, 900, 600, None, None, None, None)
+    iniciar, flujo, previa = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+    ole.CoCreateInstance(ctypes.byref(CLSID_TEXTO), None, 4, ctypes.byref(IID_INICIAR), ctypes.byref(iniciar))
+    ctypes.windll.shlwapi.SHCreateStreamOnFileEx(os.path.join(caja, "grande.txt"), 0, 0, False, None, ctypes.byref(flujo))
+    metodo(iniciar, 3, ctypes.c_void_p, w.DWORD)(iniciar, flujo, 0)
+    metodo(iniciar, 0, ctypes.c_void_p, ctypes.c_void_p)(iniciar, ctypes.byref(IID_VISTA), ctypes.byref(previa))
+    rect = w.RECT(0, 0, 900, 600)
+    metodo(previa, 3, w.HWND, ctypes.c_void_p)(previa, host, ctypes.byref(rect))
+    t = time.perf_counter()
+    metodo(previa, 5)(previa)
+    abrir = (time.perf_counter() - t) * 1000
+    peor = 0.0
+    for k in range(20):
+        rect = w.RECT(0, 0, 880 - k * 15, 600)
+        t = time.perf_counter()
+        metodo(previa, 4, ctypes.c_void_p)(previa, ctypes.byref(rect))
+        peor = max(peor, (time.perf_counter() - t) * 1000)
+        bombear(0.016)
+    def es_texto(x):
+        b = ctypes.create_unicode_buffer(64)
+        u32.GetClassNameW(x, b, 64)
+        return "RICHEDIT" in b.value.upper()
+    cajas = []
+    u32.EnumChildWindows(host, ENUM(lambda x, _: (cajas.append(x) if es_texto(x) else None) or True), 0)
+    leido, fin = "", time.time() + 5
+    while cajas and time.time() < fin and not leido.endswith("FIN DEL ARCHIVO"):
+        bombear(0.1)
+        n = u32.SendMessageW(cajas[0], 0x0E, 0, 0)   # WM_GETTEXTLENGTH
+        b = ctypes.create_unicode_buffer(n + 1)
+        u32.SendMessageW(cajas[0], 0x0D, n + 1, ctypes.addressof(b))   # WM_GETTEXT
+        leido = b.value
+    ok(abrir < 80, "un .txt de 1 MB se enseña enseguida (%.0f ms)" % abrir)
+    ok(peor < 30, "y mientras llega el resto, cada cambio de tamaño vuelve enseguida (el peor, %.0f ms)" % peor)
+    ok(leido.replace("\r\n", "\r") == lineas.replace("\r\n", "\r"), "y acaba entero y en orden (%d de %d caracteres)" % (len(leido), len(lineas)))
+    metodo(previa, 6)(previa)
+    for p in (previa, flujo, iniciar):
+        if p:
+            metodo(p, 2)(p)
+    u32.DestroyWindow(host)
+    k32.TerminateProcess(pi.hProcess, 0)
+    k32.WaitForSingleObject(pi.hProcess, 5000)
+
+
 def trabajo():
     esc = u32.CreateDesktopW(ESC, None, None, 0, 0x10000000, None)
     u32.SetThreadDesktop(esc)
@@ -197,6 +251,7 @@ def trabajo():
     ok(json is not None and json == fotos[("md", "igual.json")], "un .json, igual por las dos clases")
     ok(md != json, "y el .md con formato, distinto del .json con el mismo texto")
     tamano()
+    texto_grande()
 
 
 hilo = threading.Thread(target=trabajo)
