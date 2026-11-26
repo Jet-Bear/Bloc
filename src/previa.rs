@@ -1,8 +1,8 @@
 // La vista previa del Explorador: Bloc.exe como servidor COM («Bloc.exe -Embedding», LocalServer32). El Explorador crea
 // una Vista, le da el archivo como flujo (IInitializeWithStream: Bloc no lo abre por su ruta ni lo bloquea) y la
 // ventana donde enseñarlo; Bloc lo enseña con su propia ventana en modo vista (ventana::vista), solo para leer. Una Vista
-// a la vez por proceso; al soltarla, el proceso se ofrece otra vez con la ventana ya hecha y, si en 60 s nadie la pide,
-// acaba. Diseño en privado\DISENO-K12.md.
+// a la vez por proceso; al soltarla, el proceso se ofrece otra vez con la ventana ya hecha y, si en cinco minutos nadie
+// la pide, acaba. Diseño en privado\DISENO-K12.md.
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 
@@ -41,7 +41,7 @@ const SIN_AGREGAR: i32 = 0x80040110_u32 as i32; // CLASS_E_NOAGGREGATION
 const TOPE: usize = 1 << 20;
 const TOPE_MD: usize = 256 << 10;
 
-/// Atiende al Explorador hasta que suelta la Vista, o un minuto si no llega a pedirla.
+/// Atiende al Explorador hasta que suelta la Vista y, después, cinco minutos más por si pide otra.
 pub fn servir() {
     unsafe {
         // OLE (para copiar) se pone después de enseñar el texto: tarda unos 18 ms.
@@ -84,14 +84,15 @@ fn retirar() {
 
 thread_local!(static RELOJ: Cell<usize> = const { Cell::new(0) });
 
-/// Un solo reloj de 60 s: uno anterior que siguiese vivo cerraría el proceso antes de tiempo.
+/// Un solo reloj: uno anterior que siguiese vivo cerraría el proceso antes de tiempo. Arrancar de nuevo cuesta unos
+/// 250 ms al Explorador (pasar de un archivo a otro con el proceso vivo, 15 ms) y esperar, unos 3 MB: cinco minutos.
 fn rearmar() {
     let antes = RELOJ.with(Cell::get);
     unsafe {
         if antes != 0 {
             KillTimer(std::ptr::null_mut(), antes);
         }
-        RELOJ.with(|r| r.set(SetTimer(std::ptr::null_mut(), 0, 60_000, Some(sin_pedir))));
+        RELOJ.with(|r| r.set(SetTimer(std::ptr::null_mut(), 0, 300_000, Some(sin_pedir))));
     }
 }
 
