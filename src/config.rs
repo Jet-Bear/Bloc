@@ -16,6 +16,8 @@ pub struct Config {
     pub nuevos_md: bool,
     /// Archivo › Guardar copia mientras escribes (ver copia.rs).
     pub copia: bool,
+    /// Ver › Ventanas nuevas del color contrario a la de delante (M10).
+    pub contrario: bool,
     /// 0 estrechos, 1 normales, 2 anchos, 3 muy anchos.
     pub margenes: u16,
     pub zoom: i32,
@@ -56,6 +58,7 @@ impl Config {
             marcas: false,
             nuevos_md: false,
             copia: true,
+            contrario: true,
             margenes: 1,
             zoom: 100,
             marco: None,
@@ -77,6 +80,7 @@ impl Config {
                 "marcas" => c.marcas = n != 0,
                 "nuevos_md" => c.nuevos_md = n != 0,
                 "copia" => c.copia = n != 0,
+                "contrario" => c.contrario = n != 0,
                 "margenes" if (0..4).contains(&n) => c.margenes = n as u16,
                 "zoom" if (30..=500).contains(&n) => c.zoom = n,
                 "tamano" if (6..=72).contains(&n) => c.tamano = n,
@@ -105,7 +109,7 @@ impl Config {
         macro_rules! mios {
             ($($x:ident),*) => { $( if self.$x != antes.$x { c.$x = self.$x; } )* };
         }
-        mios!(ajuste, barra, max, noche, corrector, marcas, nuevos_md, copia, margenes, zoom, marco, tamano);
+        mios!(ajuste, barra, max, noche, corrector, marcas, nuevos_md, copia, contrario, margenes, zoom, marco, tamano);
         if self.letra != antes.letra {
             c.letra = self.letra.clone();
         }
@@ -131,8 +135,8 @@ impl Config {
         let (x, y, w, h) = self.marco.unwrap_or_default();
         let b = |v: bool| v as u8;
         format!(
-            "ajuste={}\r\nbarra={}\r\nmax={}\r\nzoom={}\r\nmarco={x},{y},{w},{h}\r\nnoche={}\r\ncorrector={}\r\nmarcas={}\r\nnuevos_md={}\r\ncopia={}\r\nmargenes={}\r\nletra={}\r\ntamano={}\r\n",
-            b(self.ajuste), b(self.barra), b(self.max), self.zoom, b(self.noche), b(self.corrector), b(self.marcas), b(self.nuevos_md), b(self.copia), self.margenes, self.letra, self.tamano
+            "ajuste={}\r\nbarra={}\r\nmax={}\r\nzoom={}\r\nmarco={x},{y},{w},{h}\r\nnoche={}\r\ncorrector={}\r\nmarcas={}\r\nnuevos_md={}\r\ncopia={}\r\ncontrario={}\r\nmargenes={}\r\nletra={}\r\ntamano={}\r\n",
+            b(self.ajuste), b(self.barra), b(self.max), self.zoom, b(self.noche), b(self.corrector), b(self.marcas), b(self.nuevos_md), b(self.copia), b(self.contrario), self.margenes, self.letra, self.tamano
         ) + &self.recientes.iter().map(|r| format!("reciente={r}\r\n")).collect::<String>()
     }
 }

@@ -136,6 +136,13 @@ def poner_portapapeles(formatos):
     return u32.GetClipboardSequenceNumber()
 
 
+def archivos(*rutas):
+    """Lo que deja el Explorador al copiar archivos: CF_HDROP (DROPFILES con las rutas en UTF-16). Fuera del historial."""
+    datos = (20).to_bytes(4, "little") + bytes(12) + (1).to_bytes(4, "little")
+    datos += "".join(r + "\0" for r in rutas).encode("utf-16-le") + "\0".encode("utf-16-le")
+    return [(15, datos), (u32.RegisterClipboardFormatW("ExcludeClipboardContentFromMonitorProcessing"), b"\0")]
+
+
 def copiar(html, plano):
     """Lo que deja un navegador: el trozo en «HTML Format» (UTF-8, con su cabecera) y el texto. Fuera del historial."""
     cab = "Version:0.9\r\nStartHTML:-1\r\nEndHTML:-1\r\nStartFragment:%010d\r\nEndFragment:%010d\r\n"
@@ -182,7 +189,8 @@ def esperar(cond, segundos=8):
 def abrir(ruta):
     si = SI(); si.cb = ctypes.sizeof(SI); si.lpDesktop = ESCRITORIO
     pi = PI()
-    k32.CreateProcessW(None, ctypes.create_unicode_buffer('"%s" "%s"' % (exe, ruta)), None, None, False, 0, None, None,
+    orden = '"%s"' % exe if ruta is None else '"%s" "%s"' % (exe, ruta)   # sin archivo: un documento nuevo
+    k32.CreateProcessW(None, ctypes.create_unicode_buffer(orden), None, None, False, 0, None, None,
                        ctypes.byref(si), ctypes.byref(pi))
     u32.WaitForInputIdle(pi.hProcess, 15000)
     v = esperar(lambda: next((h for h in ventanas(pi.dwProcessId) if clase(h) == "BlocVentana"), None))
@@ -416,6 +424,142 @@ def pruebas():
     ok(peor < 0.25, "md: mientras convierte una web grande, el portapapeles está libre (ocupado como mucho %.0f ms)" % (peor * 1000))
     ok(cerrar_sin_guardar(pi, v), "md web grande: se cierra bien")
 
+    # M4 (1.4): archivos copiados en el Explorador. En un .md guardado, enlaces con la ruta relativa si están en su
+    # carpeta o debajo; en uno sin guardar, con la completa; en un .txt o sin formato, las rutas, una por línea.
+    sub = os.path.join(dir, "sub")
+    os.makedirs(sub, exist_ok=True)
+    uno, dos, foto = os.path.join(dir, "uno.txt"), os.path.join(sub, "dos (2).md"), os.path.join(dir, "foto.png")
+    fuera_de = os.path.join(os.environ["SystemRoot"], "win.ini")
+    ruta_md = os.path.join(dir, "archivos.md")
+    with open(ruta_md, "w", encoding="utf-8", newline="") as f:
+        f.write("Antes")
+    pi, v, e = abrir(ruta_md)
+    for que, rutas, esperado in (
+            ("un archivo de su carpeta", [uno], "[uno.txt](uno.txt)"),
+            ("uno de una subcarpeta, con espacios y paréntesis", [dos], "[dos (2).md](sub/dos%20%282%29.md)"),
+            ("una imagen", [foto], "![foto.png](foto.png)"),
+            ("una carpeta", [sub], "[sub](sub)"),
+            ("uno de fuera, con la ruta completa", [fuera_de], "[win.ini](%s)" % fuera_de),
+            ("varios, en su orden y uno por línea", [foto, uno, sub], "![foto.png](foto.png)\r\n[uno.txt](uno.txt)\r\n[sub](sub)")):
+        u32.SendMessageW(e, EM_SETSEL, 0, 0)
+        with en_portapapeles(archivos(*rutas)):
+            u32.SendMessageW(v, WM_COMMAND, PEGAR, 0)
+        ok(texto(e) == esperado + "Antes", "archivos, .md guardado: %s (%r)" % (que, texto(e)[:80]))
+        u32.SendMessageW(v, WM_COMMAND, DESHACER, 0)
+    u32.SendMessageW(e, EM_SETSEL, 0, 0)
+    with en_portapapeles(archivos(uno, dos)):
+        u32.SendMessageW(v, WM_COMMAND, PEGAR_TEXTO, 0)
+    ok(texto(e) == "%s\r\n%sAntes" % (uno, dos), "archivos, .md con «Pegar sin formato»: las rutas completas")
+    ok(cerrar_sin_guardar(pi, v), "archivos, .md: se cierra bien")
+    ruta_txt2 = os.path.join(dir, "archivos.txt")
+    with open(ruta_txt2, "w", encoding="utf-8", newline="") as f:
+        f.write("Antes")
+    pi, v, e = abrir(ruta_txt2)
+    u32.SendMessageW(e, EM_SETSEL, 0, 0)
+    with en_portapapeles(archivos(uno, sub)):
+        u32.SendMessageW(v, WM_COMMAND, PEGAR, 0)
+    ok(texto(e) == "%s\r\n%sAntes" % (uno, sub), "archivos, .txt: las rutas completas, una por línea")
+    ok(cerrar_sin_guardar(pi, v), "archivos, .txt: se cierra bien")
+    with open(INI, "w") as f:
+        f.write("ajuste=1\nbarra=1\nmax=0\nzoom=100\nnoche=0\nnuevos_md=1\n")
+    pi, v, e = abrir(None)
+    with en_portapapeles(archivos(uno)):
+        u32.SendMessageW(v, WM_COMMAND, PEGAR, 0)
+    ok(texto(e) == "[uno.txt](%s)" % uno.replace(" ", "%20"), "archivos, .md sin guardar: con la ruta completa (%r)" % texto(e)[:80])
+    ok(cerrar_sin_guardar(pi, v), "archivos, .md sin guardar: se cierra bien")
+    with open(INI, "w") as f:
+        f.write("ajuste=1\nbarra=1\nmax=0\nzoom=100\nnoche=0\n")
+
+    # M5 (1.4): una imagen sola en un .md guardado se guarda como PNG en su carpeta y se enlaza; en uno sin guardar
+    # pide «Guardar como» (cancelado, nada); en un .txt, nada; en una carpeta sin permiso de escritura, nada.
+    import re
+    import subprocess
+    import zlib
+
+    def png_1x1():
+        def trozo(tipo, datos):
+            return len(datos).to_bytes(4, "big") + tipo + datos + zlib.crc32(tipo + datos).to_bytes(4, "big")
+        return (b"\x89PNG\r\n\x1a\n" + trozo(b"IHDR", (1).to_bytes(4, "big") * 2 + bytes([8, 2, 0, 0, 0]))
+                + trozo(b"IDAT", zlib.compress(b"\0\xff\0\0")) + trozo(b"IEND", b""))
+
+    fuera_m5 = u32.RegisterClipboardFormatW("ExcludeClipboardContentFromMonitorProcessing")
+    PNG = [(u32.RegisterClipboardFormatW("PNG"), png_1x1()), (fuera_m5, b"\0")]
+    pixel = (40).to_bytes(4, "little") + (1).to_bytes(4, "little") * 2 + (1).to_bytes(2, "little") + (32).to_bytes(2, "little") + bytes(24) + b"\x00\x80\xff\x00"
+    DIB = [(8, pixel), (fuera_m5, b"\0")]
+    enlace = re.compile(r"!\[\]\((imagenes%20\d{4}-\d\d-\d\d%20\d\d-\d\d-\d\d(%20\d+)?\.png)\)")
+    carpeta_m5 = os.path.join(dir, "m5")
+    os.makedirs(carpeta_m5, exist_ok=True)
+    ruta_md = os.path.join(carpeta_m5, "imagenes.md")
+    with open(ruta_md, "w", encoding="utf-8", newline="") as f:
+        f.write("Antes")
+
+    def pngs(c):
+        return sorted(n for n in os.listdir(c) if n.endswith(".png"))
+
+    pi, v, e = abrir(ruta_md)
+    for que, formatos in (("un PNG", PNG), ("solo un mapa de bits (CF_DIB)", DIB)):
+        antes = pngs(carpeta_m5)
+        u32.SendMessageW(e, EM_SETSEL, 0, 0)
+        with en_portapapeles(formatos):
+            u32.SendMessageW(v, WM_COMMAND, PEGAR, 0)
+        nuevos = [n for n in pngs(carpeta_m5) if n not in antes]
+        m = enlace.match(texto(e))
+        ok(len(nuevos) == 1 and m is not None and texto(e).endswith("Antes"), "imagen, .md guardado, %s: el PNG en su carpeta y su enlace (%r)" % (que, texto(e)[:70]))
+        if nuevos:
+            with open(os.path.join(carpeta_m5, nuevos[0]), "rb") as f:
+                ok(f.read(8) == b"\x89PNG\r\n\x1a\n", "imagen, .md guardado, %s: el archivo es un PNG" % que)
+        u32.SendMessageW(v, WM_COMMAND, DESHACER, 0)
+        ok(texto(e) == "Antes" and len(pngs(carpeta_m5)) == len(antes) + 1, "imagen, %s: deshacer quita el enlace y el PNG se queda" % que)
+    antes = pngs(carpeta_m5)
+    for _ in range(2):
+        u32.SendMessageW(e, EM_SETSEL, 0, 0)
+        with en_portapapeles(PNG):
+            u32.SendMessageW(v, WM_COMMAND, PEGAR, 0)
+    nuevos = [n for n in pngs(carpeta_m5) if n not in antes]
+    ok(len(nuevos) == 2 and len(enlace.findall(texto(e))) == 2, "imagen: dos seguidas, dos archivos con nombres distintos (%s)" % nuevos)
+    ok(not [n for n in os.listdir(carpeta_m5) if n.endswith(".bloc-tmp")], "imagen: no deja temporales")
+    ok(cerrar_sin_guardar(pi, v), "imagen, .md: se cierra bien")
+
+    ruta_txt3 = os.path.join(carpeta_m5, "imagen.txt")
+    with open(ruta_txt3, "w", encoding="utf-8", newline="") as f:
+        f.write("Antes")
+    antes = pngs(carpeta_m5)
+    pi, v, e = abrir(ruta_txt3)
+    with en_portapapeles(PNG):
+        u32.SendMessageW(v, WM_COMMAND, PEGAR, 0)
+    ok(texto(e) == "Antes" and pngs(carpeta_m5) == antes, "imagen, .txt: no pega nada ni guarda nada")
+    ok(cerrar_sin_guardar(pi, v), "imagen, .txt: se cierra bien")
+
+    with open(INI, "w") as f:
+        f.write("ajuste=1\nbarra=1\nmax=0\nzoom=100\nnoche=0\nnuevos_md=1\n")
+    pi, v, e = abrir(None)
+    with en_portapapeles(PNG):
+        u32.PostMessageW(v, WM_COMMAND, PEGAR, 0)
+        d = esperar(lambda: next((h for h in ventanas(pi.dwProcessId) if clase(h) == "#32770"), None), 5)
+        if d:
+            u32.PostMessageW(d, WM_COMMAND, 2, 0)   # IDCANCEL
+        esperar(lambda: not u32.IsWindow(d), 3)
+    ok(d is not None and texto(e) == "", "imagen, .md sin guardar: sale «Guardar como» y, cancelado, no pega nada")
+    ok(cerrar_sin_guardar(pi, v), "imagen, .md sin guardar: se cierra bien")
+    with open(INI, "w") as f:
+        f.write("ajuste=1\nbarra=1\nmax=0\nzoom=100\nnoche=0\n")
+
+    cerrada = os.path.join(dir, "m5-sin-permiso")
+    os.makedirs(cerrada, exist_ok=True)
+    ruta_cerrada = os.path.join(cerrada, "imagenes.md")
+    with open(ruta_cerrada, "w", encoding="utf-8", newline="") as f:
+        f.write("Antes")
+    yo = os.environ["USERNAME"]
+    subprocess.run(["icacls", cerrada, "/deny", "%s:(AD,WD)" % yo], check=True, capture_output=True)
+    try:
+        pi, v, e = abrir(ruta_cerrada)
+        with en_portapapeles(PNG):
+            u32.SendMessageW(v, WM_COMMAND, PEGAR, 0)
+        ok(texto(e) == "Antes" and pngs(cerrada) == [], "imagen, carpeta sin permiso de escritura: no pega nada")
+        ok(cerrar_sin_guardar(pi, v), "imagen, carpeta sin permiso: se cierra bien")
+    finally:
+        subprocess.run(["icacls", cerrada, "/remove:d", yo], check=True, capture_output=True)
+
     # Portapapeles vacío, solo con una imagen y con el texto diferido (el programa que copió lo da al pedirlo): pegar no
     # cuelga ni pega nada raro.
     fuera = u32.RegisterClipboardFormatW("ExcludeClipboardContentFromMonitorProcessing")
@@ -428,8 +572,8 @@ def pruebas():
     dib = (40).to_bytes(4, "little") + (1).to_bytes(4, "little") * 2 + (1).to_bytes(2, "little") + (32).to_bytes(2, "little") + bytes(24) + bytes(4)
     F = [(8, dib), (fuera, b"\0")]   # CF_DIB de un píxel
     with en_portapapeles(F):
-        u32.SendMessageW(v, WM_COMMAND, PEGAR, 0)
-    ok(texto(e) == original, "md: con solo una imagen, pegar no hace nada")
+        u32.SendMessageW(v, WM_COMMAND, PEGAR_TEXTO, 0)
+    ok(texto(e) == original, "md: con solo una imagen, «Pegar sin formato» no hace nada (pegarla la guarda: M5)")
 
     PROC = ctypes.WINFUNCTYPE(w.LPARAM, w.HWND, w.UINT, w.WPARAM, w.LPARAM)
     u32.DefWindowProcW.argtypes = [w.HWND, w.UINT, w.WPARAM, w.LPARAM]

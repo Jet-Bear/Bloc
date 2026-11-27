@@ -13,6 +13,7 @@ mod fuentes;
 mod historial;
 mod html;
 mod idiomas;
+mod imagen;
 mod imprimir;
 mod informe;
 mod instalar;

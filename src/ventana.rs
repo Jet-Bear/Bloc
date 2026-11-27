@@ -90,6 +90,7 @@ pub mod c {
     pub const MARCAS: u16 = 1058;
     pub const NUEVOS_MD: u16 = 1059;
     pub const COD: u16 = 1060; // UTF-8, UTF-8 con BOM, UTF-16 LE, UTF-16 BE, ANSI
+    pub const CONTRARIO: u16 = 1069;
     pub const SALTOS: u16 = 1070; // CRLF, LF, CR
     pub const MARGENES: u16 = 1080; // estrechos, normales, anchos, muy anchos
     pub const RECIENTE: u16 = 1090; // los 8 de Archivo › Recientes
@@ -221,6 +222,9 @@ pub struct App {
     pareja: Cell<Option<(usize, u8)>>,
     /// La vista previa del Explorador (ver `vista`): sin barras ni menús, solo para leer.
     vista: Cell<bool>,
+    /// El modo de noche guardado, mientras esta ventana lleva el contrario al de otra (M10): es el que se guarda al
+    /// cerrar, salvo que se cambie a mano.
+    noche_guardada: Cell<Option<bool>>,
 }
 
 /// Lo que deja la escritura del archivo para la ventana.
@@ -305,9 +309,30 @@ fn nueva_app() -> &'static App {
         forzado: Cell::new(None),
         pareja: Cell::new(None),
         vista: Cell::new(false),
+        noche_guardada: Cell::new(None),
     }));
     APP.store(a, Ordering::SeqCst);
     a
+}
+
+/// En cada ventana de Bloc, su modo (1 claro, 2 oscuro), para que la siguiente sepa cuál lleva la de delante (M10).
+const PROP_NOCHE: &[u16] = &[66, 108, 111, 99, 78, 111, 99, 104, 101, 0]; // «BlocNoche»
+
+/// Si la última ventana de Bloc que estaba delante va en oscuro (la primera visible por orden de delante a atrás), o
+/// nada si no hay otra. Es buscar ventanas y leer una propiedad: microsegundos.
+fn noche_de_otra() -> Option<bool> {
+    let clase = ws("BlocVentana");
+    let mut h = std::ptr::null_mut();
+    loop {
+        h = unsafe { FindWindowExW(std::ptr::null_mut(), h, clase.as_ptr(), std::ptr::null()) };
+        if h.is_null() {
+            return None;
+        }
+        let modo = unsafe { GetPropW(h, PROP_NOCHE.as_ptr()) } as usize;
+        if unsafe { IsWindowVisible(h) } != 0 && modo != 0 {
+            return Some(modo == 2);
+        }
+    }
 }
 
 /// La clase de la ventana de Bloc, que usan también la vista previa.
@@ -404,6 +429,14 @@ pub fn ejecutar(archivo: Option<OsString>, instalado: bool) -> i32 {
         RegisterApplicationRestart(ws("/reinicio").as_ptr(), RESTART_NO_CRASH | RESTART_NO_HANG);
     }
     let a = nueva_app();
+    // M10: con la opción, del color contrario al de la última ventana de Bloc que estaba delante; sin otra, el guardado.
+    if a.cfg.borrow().contrario
+        && let Some(otra) = noche_de_otra()
+    {
+        let guardada = a.cfg.borrow().noche;
+        a.noche_guardada.set(Some(guardada));
+        a.cfg.borrow_mut().noche = !otra;
+    }
     if a.cfg.borrow().noche {
         tema::menus(true);
     }
@@ -557,7 +590,26 @@ fn mensaje_ventana(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             0
         }
-        WM_ERASEBKGND => 1,
+        // Sin barra de título, la franja de arriba es la que se arrastra para mover la ventana (y se pinta como la barra).
+        WM_ERASEBKGND => {
+            let t = tira();
+            if t > 0 {
+                let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                unsafe {
+                    GetClientRect(h, &mut rc);
+                    let pincel = CreateSolidBrush(tema::paleta(a.cfg.borrow().noche).barra);
+                    FillRect(wp as HDC, &RECT { bottom: t, ..rc }, pincel);
+                    DeleteObject(pincel as _);
+                }
+            }
+            1
+        }
+        WM_NCHITTEST => {
+            let r = unsafe { DefWindowProcW(h, m, wp, lp) };
+            let mut p = POINT { x: (lp & 0xFFFF) as i16 as i32, y: ((lp >> 16) & 0xFFFF) as i16 as i32 };
+            unsafe { ScreenToClient(h, &mut p) };
+            if r == HTCLIENT as LRESULT && p.y < tira() { HTCAPTION as LRESULT } else { r }
+        }
         WM_SETFOCUS => {
             editor::rastro("ventana:foco");
             unsafe { SetFocus(a.ed.get()) };
@@ -677,6 +729,7 @@ fn mensaje_ventana(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             0
         }
         WM_DESTROY => {
+            unsafe { RemovePropW(h, PROP_NOCHE.as_ptr()) };
             // Solo se llega aquí con lo de esta ventana guardado, descartado o en la nota.
             crate::copia::borrar(h);
             unsafe { PostQuitMessage(0) };
@@ -798,7 +851,7 @@ fn crear_menu(h: HWND) {
         anadir(edicion, c::HORA, t.hora_fecha);
 
         let ver = CreatePopupMenu();
-        for (id, s) in [(c::AJUSTE, t.ajuste), (c::BARRA, t.barra_estado), (c::NOCHE, t.noche), (c::CORRECTOR, t.corrector), (c::MARCAS, t.marcas), (c::NUEVOS_MD, t.nuevos_md)] {
+        for (id, s) in [(c::AJUSTE, t.ajuste), (c::BARRA, t.barra_estado), (c::NOCHE, t.noche), (c::CORRECTOR, t.corrector), (c::MARCAS, t.marcas), (c::NUEVOS_MD, t.nuevos_md), (c::CONTRARIO, t.contrario)] {
             anadir(ver, id, s);
         }
         raya(ver);
@@ -872,8 +925,35 @@ fn abrir_reciente(i: usize) {
     }
 }
 
+/// Sin barra de título (ventana muy baja), la franja de arriba del texto por la que se arrastra la ventana.
+fn tira() -> i32 {
+    let h = app().hwnd.get();
+    if unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32 & WS_CAPTION == WS_CAPTION { 0 } else { px(6) }
+}
+
+/// La barra de título con el marco sale si pasa del 25 % del alto de la ventana, y vuelve al agrandarla (M3). Dice si
+/// la ha quitado o puesto: entonces Windows vuelve a mandar WM_SIZE y se coloca todo con ese.
+fn titulo_segun_alto(alto: i32) -> bool {
+    let h = app().hwnd.get();
+    // Con el manifiesto (dpiAware), las medidas de Windows ya van a los puntos por pulgada de la pantalla.
+    let barra = unsafe { GetSystemMetrics(SM_CYCAPTION) + GetSystemMetrics(SM_CYSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER) };
+    let quitar = unsafe { IsZoomed(h) } == 0 && barra * 4 > alto;
+    let estilo = unsafe { GetWindowLongPtrW(h, GWL_STYLE) };
+    let tiene = estilo as u32 & WS_CAPTION == WS_CAPTION;
+    if tiene != quitar {
+        return false;
+    }
+    let nuevo = if quitar { estilo & !(WS_CAPTION as isize) } else { estilo | WS_CAPTION as isize };
+    unsafe {
+        SetWindowLongPtrW(h, GWL_STYLE, nuevo);
+        SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    true
+}
+
 /// La barra de botones arriba, debajo el panel de buscar (con el alto que tenga mientras se despliega), el texto y la
-/// barra de estado.
+/// barra de estado. Ninguna franja pasa del 25 % del alto de la ventana (M3): la que no cabe se esconde mientras tanto
+/// (el panel de buscar, primero a solo su fila de buscar) y sus teclas siguen yendo; lo elegido en «Ver» no cambia.
 pub fn colocar() {
     let a = app();
     let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
@@ -884,16 +964,42 @@ pub fn colocar() {
         margenes();
         return;
     }
+    let mut rv = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    unsafe { GetWindowRect(a.hwnd.get(), &mut rv) };
+    let alto = rv.bottom - rv.top;
+    if titulo_segun_alto(alto) {
+        return;
+    }
+    let cabe = |x: i32| x * 4 <= alto;
+    let tira = tira();
     let arriba = if a.md.get() { barras::alto_botones(w) } else { 0 };
+    let mut arriba = if cabe(arriba) { arriba } else { 0 };
     let panel = buscar::alto();
+    let mut panel = if cabe(panel) { panel } else if cabe(buscar::fila()) { panel.min(buscar::fila()) } else { 0 };
     let abajo = if a.cfg.borrow().barra { barras::alto_estado() } else { 0 };
-    let texto = arriba + panel;
+    let mut abajo = if cabe(abajo) { abajo } else { 0 };
+    // Cada franja cabe en su 25 %, pero juntas pueden no dejar sitio al texto: al menos una línea, escondiendo en el
+    // mismo orden (la fila de reemplazar, la barra de botones, el panel y la barra de estado).
+    let poco = |arriba: i32, panel: i32, abajo: i32| h - tira - arriba - panel - abajo < px(24);
+    if poco(arriba, panel, abajo) {
+        panel = panel.min(buscar::fila());
+    }
+    if poco(arriba, panel, abajo) {
+        arriba = 0;
+    }
+    if poco(arriba, panel, abajo) {
+        panel = 0;
+    }
+    if poco(arriba, panel, abajo) {
+        abajo = 0;
+    }
+    let texto = tira + arriba + panel;
     // Todos de una vez: se repintan juntos y no uno tras otro.
     unsafe {
         let mut d = BeginDeferWindowPos(4);
-        let mut sitios = vec![(a.botones.get(), 0, arriba), (a.estado.get(), h - abajo, abajo), (a.ed.get(), texto, (h - texto - abajo).max(0))];
+        let mut sitios = vec![(a.botones.get(), tira, arriba), (a.estado.get(), h - abajo, abajo), (a.ed.get(), texto, (h - texto - abajo).max(0))];
         if !a.buscador.get().is_null() {
-            sitios.push((a.buscador.get(), arriba, panel));
+            sitios.push((a.buscador.get(), tira + arriba, panel));
         }
         for (v, y, alto) in sitios {
             if !d.is_null() {
@@ -1004,7 +1110,12 @@ fn comando(id: u16) {
             colocar();
             estado();
         }
+        c::CONTRARIO => {
+            let si = !a.cfg.borrow().contrario;
+            a.cfg.borrow_mut().contrario = si;
+        }
         c::NOCHE => {
+            a.noche_guardada.set(None);
             let si = !a.cfg.borrow().noche;
             a.cfg.borrow_mut().noche = si;
             tema::menus(si);
@@ -1729,6 +1840,9 @@ fn guardar_config() {
     // configuración: al ocultarse llegan mensajes (WM_NCACTIVATE) que la leen.
     unsafe { ShowWindow(h, SW_HIDE) };
     let mut cfg = a.cfg.borrow_mut();
+    if let Some(n) = a.noche_guardada.get() {
+        cfg.noche = n;
+    }
     cfg.max = max;
     cfg.marco = Some((r.left, r.top, r.right - r.left, r.bottom - r.top));
     cfg.guardar();
@@ -1786,6 +1900,60 @@ pub fn deshacer_propio() -> bool {
 }
 
 /// Lo copiado con formato se pega convertido en Markdown en los .md, salvo dentro de un bloque de código.
+/// Lo que se pega de unos archivos copiados en el Explorador, uno por línea y en su orden. En un .md (con formato), un
+/// enlace a cada uno, `![nombre](ruta)` si es una imagen; la ruta, relativa al .md si está en su carpeta o debajo, y
+/// escrita como en un enlace de HTML pegado. Si no, su ruta completa. Nada se copia ni se mueve.
+pub fn archivos_al_pegar(rutas: &[Vec<u16>], con_formato: bool) -> Vec<u16> {
+    use std::os::windows::ffi::OsStringExt;
+    let a = app();
+    let carpeta = a.ruta.borrow().as_ref().and_then(|r| r.parent().map(std::path::Path::to_path_buf));
+    let lineas: Vec<Vec<u16>> = rutas
+        .iter()
+        .map(|r| {
+            if !con_formato {
+                return r.clone();
+            }
+            let ruta = PathBuf::from(OsString::from_wide(r));
+            let nombre = ruta.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let destino = match carpeta.as_ref().and_then(|c| ruta.strip_prefix(c).ok()) {
+                Some(dentro) => dentro.to_string_lossy().replace('\\', "/"),
+                None => ruta.to_string_lossy().into_owned(),
+            };
+            let ext = ruta.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            let imagen = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico");
+            let nombre = nombre.replace('[', "\\[").replace(']', "\\]");
+            format!("{}[{nombre}]({})", if imagen { "!" } else { "" }, crate::html::url(&destino)).encode_utf16().collect()
+        })
+        .collect();
+    lineas.join(&CR)
+}
+
+/// Una imagen pegada (M5): en un .md, guardada como PNG junto a él y enlazada donde está el cursor; un .md sin guardar
+/// pide antes dónde guardarlo (si se cancela, nada). En lo demás, solo un aviso. Deshacer quita el enlace, no el archivo.
+pub fn imagen_al_pegar(im: &crate::imagen::Imagen) {
+    let a = app();
+    let t = t();
+    if !a.md.get() {
+        poner_mensaje(t.imagen_solo_md);
+        return;
+    }
+    if a.ruta.borrow().is_none() && !guardar(true, false) {
+        return;
+    }
+    let Some(ruta) = a.ruta.borrow().clone() else { return };
+    match crate::imagen::guardar_junto(&ruta, im) {
+        Ok(nombre) => {
+            let enlace: Vec<u16> = format!("![]({})", crate::html::url(&nombre)).encode_utf16().collect();
+            cortar_deshacer();
+            editor::editando(|| editor::sustituir(a.ed.get(), &enlace));
+            cortar_deshacer();
+            poner_mensaje(&con(t.imagen_guardada, &nombre));
+        }
+        Err(crate::imagen::Fallo::Grande) => poner_mensaje(t.imagen_grande),
+        Err(crate::imagen::Fallo::NoSeEscribe) => poner_mensaje(t.imagen_no_se_guarda),
+    }
+}
+
 pub fn pegar_con_formato() -> bool {
     let a = app();
     if !a.md.get() {
@@ -3175,6 +3343,50 @@ fn enlace() {
     editor::seleccionar(ed, p, p);
 }
 
+/// Inicio va primero a la primera letra de la línea, tras la sangría (y en un .md tras la cita y la marca de lista), y
+/// otra vez al principio de la línea, como en los editores de código. Solo en la primera línea a la vista de un
+/// párrafo: en las demás y en una línea sin sangría ni marca, el Inicio de RichEdit. Con Mayús, alarga la selección.
+pub fn inicio(mayus: bool) -> bool {
+    let a = app();
+    let ed = a.ed.get();
+    let (ancla, activo) = editor::seleccion_con_sentido(ed);
+    let desde = editor::inicio_a_la_vista(ed, activo);
+    if desde > 0 && editor::rango(ed, desde - 1, desde) != [CR] {
+        return false;
+    }
+    let l = editor::rango(ed, desde, (desde + 1024).min(editor::largo(ed)));
+    let l = &l[..l.iter().position(|&c| c == CR).unwrap_or(l.len())];
+    let espacios = |l: &[u16]| l.iter().take_while(|&&c| c == b' ' as u16 || c == 9).count();
+    let n = if a.md.get() {
+        let q = largo_cita(l);
+        md::marca_lista(&l[q..]).map_or_else(|| q + espacios(&l[q..]), |(_, fin)| q + fin)
+    } else {
+        espacios(l)
+    };
+    if n == 0 {
+        return false;
+    }
+    let destino = if activo == desde + n { desde } else { desde + n };
+    if mayus {
+        editor::seleccionar_con_sentido(ed, ancla, destino);
+    } else {
+        editor::seleccionar(ed, destino, destino);
+    }
+    true
+}
+
+/// Intro en una línea sangrada: la nueva empieza con la misma sangría, la de espacios y tabuladores de antes del cursor.
+fn intro_sangrado(ed: HWND, s: usize) -> bool {
+    let antes = editor::rango(ed, s.saturating_sub(4096), s);
+    let l = &antes[antes.iter().rposition(|&c| c == CR).map_or(0, |i| i + 1)..];
+    let n = l.iter().take_while(|&&c| c == b' ' as u16 || c == 9).count();
+    if n == 0 {
+        return false;
+    }
+    editor::sustituir(ed, &[&[CR][..], &l[..n]].concat());
+    true
+}
+
 /// Las marcas de cita del principio de una línea, con su sangría y su espacio: «> » o «> > ».
 fn largo_cita(l: &[u16]) -> usize {
     let mut k = 0;
@@ -3774,7 +3986,7 @@ pub fn intro() -> bool {
         return true;
     }
     if !a.md.get() {
-        return false;
+        return intro_sangrado(ed, s);
     }
     let t = texto();
     let s = s.min(t.len());
@@ -3810,7 +4022,7 @@ pub fn intro() -> bool {
             editor::sustituir(ed, if s > ini { &[CR, CR][..] } else { &[CR][..] });
             return true;
         }
-        None => return false,
+        None => return intro_sangrado(ed, s),
     };
     let sangria = antes.iter().take_while(|&&c| c == b' ' as u16 || c == 9).count();
     if primera == ini && blanca(&t[(ini + marca).min(fin)..fin]) {
@@ -3941,6 +4153,9 @@ pub fn celda(adelante: bool) -> bool {
 fn colores() {
     let a = app();
     let noche = a.cfg.borrow().noche;
+    if !a.vista.get() {
+        unsafe { SetPropW(a.hwnd.get(), PROP_NOCHE.as_ptr(), (1 + noche as usize) as HANDLE) };
+    }
     a.barras.noche.set(noche);
     tema::titulo(a.hwnd.get(), noche);
     tema::nativo(a.ed.get(), noche, "DarkMode_Explorer");
@@ -4019,7 +4234,8 @@ fn estados_menu(m: HMENU) {
     } else {
         (enviar(ed, EM_CANUNDO, 0, 0) != 0, enviar(ed, re::EM_CANREDO, 0, 0) != 0)
     };
-    let pegar = unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT as u32) } != 0;
+    // Texto o archivos copiados en el Explorador (CF_HDROP).
+    let pegar = unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT as u32) != 0 || IsClipboardFormatAvailable(15) != 0 };
     let activo = |si: bool| if si { MF_ENABLED } else { MF_GRAYED };
     let cfg = a.cfg.borrow();
     unsafe {
@@ -4032,7 +4248,7 @@ fn estados_menu(m: HMENU) {
         EnableMenuItem(m, c::PEGAR_TEXTO as u32, activo(pegar));
         EnableMenuItem(m, c::LETRA as u32, activo(!a.vivo.get()));
         EnableMenuItem(m, c::MARCAS as u32, activo(a.vivo.get()));
-        for (id, si) in [(c::AJUSTE, cfg.ajuste), (c::BARRA, cfg.barra), (c::NOCHE, cfg.noche), (c::CORRECTOR, cfg.corrector), (c::MARCAS, cfg.marcas), (c::NUEVOS_MD, cfg.nuevos_md), (c::COPIA, cfg.copia)] {
+        for (id, si) in [(c::AJUSTE, cfg.ajuste), (c::BARRA, cfg.barra), (c::NOCHE, cfg.noche), (c::CORRECTOR, cfg.corrector), (c::MARCAS, cfg.marcas), (c::NUEVOS_MD, cfg.nuevos_md), (c::CONTRARIO, cfg.contrario), (c::COPIA, cfg.copia)] {
             CheckMenuItem(m, id as u32, if si { MF_CHECKED } else { MF_UNCHECKED });
         }
         let cod = match a.cod.get() {

@@ -7,12 +7,12 @@ use windows_sys::Win32::Foundation::{GlobalFree, HWND, LPARAM, LRESULT, POINT, P
 use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, ClientToScreen, CreateBitmap, CreateCompatibleBitmap, CreateCompatibleDC, CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, FillRect, GetDC, GetUpdateRect, GetUpdateRgn, InvalidateRect, InvalidateRgn, ReleaseDC, ValidateRect, HRGN, SelectObject, SetBkColor, SetTextColor, UpdateWindow, FF_MODERN, FF_SWISS, SRCCOPY,
 };
-use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW, SetClipboardData};
+use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
 use windows_sys::Win32::System::Ole::{RevokeDragDrop, CF_UNICODETEXT};
 use windows_sys::Win32::UI::Controls::{EM_CHARFROMPOS, EM_GETFIRSTVISIBLELINE, EM_GETLINECOUNT, EM_GETRECT, EM_LINEINDEX, EM_LINESCROLL, EM_POSFROMCHAR, EM_REPLACESEL, EM_SCROLLCARET, EM_SETMARGINS, EM_SETRECT, EM_SETSEL, EM_UNDO};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetCapture, GetFocus, SetFocus, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F6, VK_HOME, VK_INSERT, VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetCapture, GetFocus, GetKeyboardState, SetFocus, SetKeyboardState, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F6, VK_HOME, VK_INSERT, VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, DragAcceptFiles, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -150,7 +150,7 @@ impl<F: FnMut()> Drop for AlSalir<F> {
     }
 }
 
-fn editando<R>(f: impl FnOnce() -> R) -> R {
+pub fn editando<R>(f: impl FnOnce() -> R) -> R {
     EN_CURSO.with(|e| e.set(e.get() + 1));
     let r = {
         let _fin = AlSalir(|| EN_CURSO.with(|e| e.set(e.get() - 1)));
@@ -611,6 +611,46 @@ pub fn sin_deshacer<R>(h: HWND, f: impl FnOnce() -> R) -> R {
     })
 }
 
+/// ITextSelection mientras dura `f` (ITextDocument::GetSelection, 8), o nada si el control no la da.
+fn con_seleccion<R>(h: HWND, f: impl FnOnce(Doc) -> R) -> Option<R> {
+    type Dar = unsafe extern "system" fn(Doc, *mut Doc) -> i32;
+    con_documento(h, |doc| unsafe {
+        let mut sel: Doc = std::ptr::null_mut();
+        if doc.is_null() || (std::mem::transmute::<usize, Dar>(metodo(doc, 8)))(doc, &mut sel) != 0 || sel.is_null() {
+            return None;
+        }
+        let r = f(sel);
+        soltar(sel);
+        Some(r)
+    })
+}
+
+/// La selección con su sentido, (ancla, extremo que se mueve): EM_EXGETSEL no dice hacia dónde se alargó.
+/// ITextRange::GetStart (14) y GetEnd (16), e ITextSelection::GetFlags (58) con tomSelStartActive.
+pub fn seleccion_con_sentido(h: HWND) -> (usize, usize) {
+    type Dar = unsafe extern "system" fn(Doc, *mut i32) -> i32;
+    let (s, e) = seleccion(h);
+    con_seleccion(h, |sel| unsafe {
+        let mut f = 0;
+        (std::mem::transmute::<usize, Dar>(metodo(sel, 58)))(sel, &mut f);
+        if f & 1 != 0 { (e, s) } else { (s, e) }
+    })
+    .unwrap_or((s, e))
+}
+
+/// Pone la selección de `ancla` a `activo`, con el que se mueve donde se dice (ITextRange::SetRange, 28).
+pub fn seleccionar_con_sentido(h: HWND, ancla: usize, activo: usize) {
+    type Poner = unsafe extern "system" fn(Doc, i32, i32) -> i32;
+    if con_seleccion(h, |sel| unsafe { (std::mem::transmute::<usize, Poner>(metodo(sel, 28)))(sel, ancla as i32, activo as i32) }).is_none() {
+        seleccionar(h, ancla, activo);
+    }
+}
+
+/// Dónde empieza la línea a la vista en la que está `pos` (con el ajuste de línea, un párrafo tiene varias).
+pub fn inicio_a_la_vista(h: HWND, pos: usize) -> usize {
+    enviar(h, EM_LINEINDEX, enviar(h, EM_EXLINEFROMCHAR, 0, pos as isize) as usize, 0).max(0) as usize
+}
+
 /// ITextDocument::Freeze (18) y Unfreeze (19): con la vista congelada no se pinta nada hasta descongelarla.
 fn congelar(doc: Doc, si: bool) {
     type Freeze = unsafe extern "system" fn(Doc, *mut i32) -> i32;
@@ -952,6 +992,48 @@ pub fn colorear_fondo(h: HWND, zonas: &[(RECT, u32)], de: u32) {
 /// El texto del portapapeles. `con_formato`: si trae HTML (navegadores, Word, Outlook) con algo que Markdown sepa
 /// decir, código de un editor o una tabla con tabuladores, ya convertido; si no, el texto tal cual, que entonces ni se
 /// copia. Con `true`, lo convertido es un bloque y va en sus propias líneas.
+/// Lo que trae el portapapeles si es solo una imagen: el PNG si viene, si no el mapa de bits (CF_DIB). Con texto o con
+/// archivos, nada: lo que copia Excel o Word lleva también una imagen y se pega como texto.
+fn imagen_del_portapapeles(h: HWND) -> Option<crate::imagen::Imagen> {
+    use crate::imagen::Imagen;
+    static PNG: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    unsafe {
+        if IsClipboardFormatAvailable(CF_UNICODETEXT as u32) != 0 || IsClipboardFormatAvailable(15) != 0 {
+            return None;
+        }
+        let png = *PNG.get_or_init(|| RegisterClipboardFormatW(ws("PNG").as_ptr()));
+        if IsClipboardFormatAvailable(png) == 0 && IsClipboardFormatAvailable(8) == 0 {
+            return None;
+        }
+        if !abrir_portapapeles(h) {
+            return None;
+        }
+        let bytes = |f: u32| leer_memoria(GetClipboardData(f), |p, n| std::slice::from_raw_parts(p as *const u8, n).to_vec());
+        let im = bytes(png).map(Imagen::Png).or_else(|| bytes(8).map(Imagen::Dib)); // CF_DIB
+        CloseClipboard();
+        im
+    }
+}
+
+/// Los archivos y carpetas copiados en el Explorador (lo que trae CF_HDROP), en su orden.
+unsafe fn archivos_copiados(d: windows_sys::Win32::Foundation::HANDLE) -> Vec<Vec<u16>> {
+    use windows_sys::Win32::UI::Shell::{DragQueryFileW, HDROP};
+    if d.is_null() {
+        return Vec::new();
+    }
+    let n = unsafe { DragQueryFileW(d as HDROP, u32::MAX, std::ptr::null_mut(), 0) };
+    (0..n)
+        .map(|i| {
+            let largo = unsafe { DragQueryFileW(d as HDROP, i, std::ptr::null_mut(), 0) } as usize;
+            let mut b = vec![0u16; largo + 1];
+            unsafe { DragQueryFileW(d as HDROP, i, b.as_mut_ptr(), b.len() as u32) };
+            b.truncate(largo);
+            b
+        })
+        .filter(|b| !b.is_empty())
+        .collect()
+}
+
 fn texto_del_portapapeles(h: HWND, con_formato: bool) -> Option<(Vec<u16>, bool)> {
     static HTML: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     static VSCODE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
@@ -962,11 +1044,12 @@ fn texto_del_portapapeles(h: HWND, con_formato: bool) -> Option<(Vec<u16>, bool)
             unsafe { CloseClipboard() };
         }
     }
-    let (html, vscode, texto) = unsafe {
+    let (html, vscode, texto, archivos) = unsafe {
         if !abrir_portapapeles(h) {
             return None;
         }
         let _cerrar = Cerrar;
+        let archivos = archivos_copiados(GetClipboardData(15)); // CF_HDROP
         let html = if con_formato {
             let formato = *HTML.get_or_init(|| RegisterClipboardFormatW(ws("HTML Format").as_ptr()));
             leer_memoria(GetClipboardData(formato), |p, n| std::slice::from_raw_parts(p as *const u8, n).to_vec())
@@ -985,8 +1068,12 @@ fn texto_del_portapapeles(h: HWND, con_formato: bool) -> Option<(Vec<u16>, bool)
             let n = (0..n / 2).take_while(|&i| *p.add(i) != 0).count();
             std::slice::from_raw_parts(p, n).to_vec()
         });
-        (html, vscode, texto)
+        (html, vscode, texto, archivos)
     };
+    // Archivos copiados en el Explorador (M4): sus rutas, o sus enlaces en un .md.
+    if !archivos.is_empty() {
+        return Some((ventana::archivos_al_pegar(&archivos, con_formato), false));
+    }
     // Se convierte ya cerrado: lo copiado de una web grande tardaría y los demás programas no podrían copiar ni pegar.
     // Más de 4 MB de HTML (un rango grande de Excel, una página entera) se pega como texto: convertirlo pararía la ventana.
     if !con_formato || html.as_ref().is_some_and(|b| b.len() > 4 << 20) {
@@ -1058,6 +1145,11 @@ fn al_portapapeles(h: HWND, t: &[u16]) -> bool {
 
 /// `con_formato`: en un Markdown (y fuera de un bloque de código), lo copiado con formato se pega convertido.
 pub fn pegar(h: HWND, con_formato: bool) {
+    // Una imagen sola (sin texto ni archivos): en un .md se guarda junto a él (M5).
+    if con_formato && let Some(im) = imagen_del_portapapeles(h) {
+        ventana::imagen_al_pegar(&im);
+        return;
+    }
     // Una dirección sobre lo seleccionado: el enlace, aunque lo copiado traiga también el suyo con título en HTML.
     let (a, b) = seleccion(h);
     let enlace = (con_formato && a != b).then(|| texto_del_portapapeles(h, false)).flatten().and_then(|(t, _)| ventana::enlace_al_pegar(&crate::fichero::normalizar(&t)));
@@ -1213,6 +1305,31 @@ fn rastro_mensaje(h: HWND, m: u32, lp: LPARAM) {
     }
 }
 
+/// ↑ en la primera línea a la vista lleva al principio del documento, y ↓ en la última al final, con Mayús alargando la
+/// selección, como el Bloc de notas y Word: RichEdit se queda donde está. Si la flecha no ha movido nada, se hace su
+/// Ctrl+Inicio o Ctrl+Fin, con Ctrl puesto en el estado del teclado de este hilo mientras tanto.
+fn flecha(h: HWND, wp: WPARAM, lp: LPARAM, pasar: impl FnOnce() -> LRESULT) -> LRESULT {
+    let vk = wp as u16;
+    if !matches!(vk, VK_UP | VK_DOWN) || pulsada(VK_CONTROL) || pulsada(VK_MENU) {
+        return pasar();
+    }
+    let antes = seleccion(h);
+    let r = pasar();
+    if seleccion(h) == antes {
+        let mut k = [0u8; 256];
+        unsafe {
+            GetKeyboardState(k.as_mut_ptr());
+            let ctrl = k[VK_CONTROL as usize];
+            k[VK_CONTROL as usize] |= 0x80;
+            SetKeyboardState(k.as_ptr());
+            DefSubclassProc(h, WM_KEYDOWN, if vk == VK_UP { VK_HOME } else { VK_END } as WPARAM, lp);
+            k[VK_CONTROL as usize] = ctrl;
+            SetKeyboardState(k.as_ptr());
+        }
+    }
+    r
+}
+
 fn mensaje(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if matches!(m, WM_MOUSEACTIVATE | WM_SETFOCUS | WM_KILLFOCUS | WM_CAPTURECHANGED | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_MOUSEMOVE) {
         rastro_mensaje(h, m, lp);
@@ -1239,9 +1356,10 @@ fn mensaje(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 menu_de_la_vista(h, lp);
                 return 0;
             }
+            WM_KEYDOWN => return flecha(h, wp, lp, || unsafe { DefSubclassProc(h, m, wp, lp) }),
             // Lo demás del teclado y lo que edita, a RichEdit, que respeta el solo lectura (y da Ctrl+A y las
             // flechas): las acciones de Bloc escriben con EM_REPLACESEL, que no lo respeta.
-            WM_KEYDOWN | WM_KEYUP | WM_CHAR | WM_SYSKEYDOWN | WM_PASTE | WM_CUT | WM_CLEAR | WM_UNDO | EM_UNDO => {
+            WM_KEYUP | WM_CHAR | WM_SYSKEYDOWN | WM_PASTE | WM_CUT | WM_CLEAR | WM_UNDO | EM_UNDO => {
                 return unsafe { DefSubclassProc(h, m, wp, lp) };
             }
             _ => {}
@@ -1368,6 +1486,9 @@ fn mensaje(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             let (ctrl, mayus, alt) = (pulsada(VK_CONTROL), pulsada(VK_SHIFT), pulsada(VK_MENU));
             let vk = wp as u16;
             INTRO_TECLA.with(|t| t.set(false));
+            if vk == VK_HOME && !ctrl && !alt && ventana::inicio(mayus) {
+                return 0;
+            }
             if vk == VK_INSERT && mayus && !ctrl {
                 pegar(h, true);
                 return 0;
@@ -1436,7 +1557,8 @@ fn mensaje(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let edita = matches!(m, WM_CHAR | WM_KEYDOWN | WM_CLEAR | WM_IME_CHAR | WM_IME_COMPOSITION | WM_IME_ENDCOMPOSITION) || m == EM_REPLACESEL;
     let escribe = m == WM_CHAR && wp >= 0x20 || m == WM_KEYDOWN && matches!(wp as u16, VK_BACK | VK_DELETE);
     let antes = (escribe && unsafe { GetFocus() } == h).then(cursor);
-    let r = if edita { editando(|| por_richedit(h, m, wp, lp)) } else { por_richedit(h, m, wp, lp) };
+    let pasar = || if edita { editando(|| por_richedit(h, m, wp, lp)) } else { por_richedit(h, m, wp, lp) };
+    let r = if m == WM_KEYDOWN { flecha(h, wp, lp, pasar) } else { pasar() };
     if m == WM_LBUTTONDOWN {
         rastro(if unsafe { GetCapture() } == h { "captura" } else { "sin captura" });
     }

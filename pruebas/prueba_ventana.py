@@ -1305,6 +1305,97 @@ ok(bytes([250, 248, 246]) in pix and bytes([229, 226, 223]) in pix, "imprimir: e
 ok(k32.WaitForSingleObject(pi.hProcess, 0) != 0 and texto(e).startswith("# Imprimir"), "imprimir: Bloc sigue con el texto como estaba")
 cerrar_sin_guardar(pi, v)
 
+# --- M3 (1.4): la ventana, del tamaño que se quiera. Ninguna franja pasa del 25 % del alto; lo escondido vuelve. ---
+WS_CAPTION, HTCAPTION, WM_NCHITTEST, VK_F3 = 0x00C00000, 2, 0x84, 0x72
+u32.GetWindowLongW.restype = ctypes.c_long
+tam = os.path.join(dir, "tamano.md")
+with open(tam, "w", encoding="utf-8", newline="") as f:
+    f.write("# Tamaño\r\n\r\nUn texto con la palabra aguja para buscarla.\r\n")
+pi, v, e = abrir(tam)
+barra_b = next(x for x in hijos(v) if clase(x) == "BlocBotones")
+barra_e = next(x for x in hijos(v) if clase(x) == "BlocEstado")
+
+
+def tamano(ancho, alto):
+    u32.MoveWindow(v, 0, 0, ancho, alto, True)
+    u32.SendMessageW(v, 0, 0, 0)
+
+
+def con_titulo():
+    return u32.GetWindowLongW(v, -16) & WS_CAPTION == WS_CAPTION
+
+
+tamano(900, 700)
+orden(v, "Edición", "Reemplazar")
+time.sleep(0.5)   # el despliegue del panel, unos 120 ms
+fila_b, dos_filas, fila_e = alto_de(barra_b), alto_de(panel_de(v)), alto_de(barra_e)
+ok(con_titulo() and fila_b > 0 and dos_filas > 0 and fila_e > 0, "tamaño: a 900×700, todo a la vista (barra %d, panel %d, estado %d)" % (fila_b, dos_filas, fila_e))
+tamano(260, 700)
+ok(alto_de(barra_b) == fila_b, "tamaño: estrecha, la barra de botones sigue en una fila (los demás, en «»»)")
+tamano(900, dos_filas * 4 - 8)
+ok(0 < alto_de(panel_de(v)) < dos_filas, "tamaño: con el panel por encima del 25 %%, solo su fila de buscar (%d)" % alto_de(panel_de(v)))
+tamano(900, 150)
+ok(alto_de(e) >= 20, "tamaño: a 150 de alto, el texto sigue teniendo al menos una línea (%d)" % alto_de(e))
+tamano(900, 80)
+ok(not con_titulo(), "tamaño: a 80 de alto, sin barra de título")
+ok(alto_de(barra_b) == 0 and alto_de(panel_de(v)) == 0 and alto_de(barra_e) == 0, "tamaño: y sin barra de botones, panel ni barra de estado")
+origen = w.POINT(60, 2)
+u32.ClientToScreen(v, ctypes.byref(origen))
+ok(u32.SendMessageW(v, WM_NCHITTEST, 0, (origen.y & 0xFFFF) << 16 | (origen.x & 0xFFFF)) == HTCAPTION,
+   "tamaño: sin barra de título, la franja de arriba mueve la ventana")
+poner(casilla(panel_de(v), 10), "aguja")
+u32.SendMessageW(e, EM_SETSEL, 0, 0)
+u32.PostMessageW(e, WM_KEYDOWN, VK_F3, 0)
+ok(esperar(lambda: seleccion(e)[1] - seleccion(e)[0] == 5, 3) is not None, "tamaño: con todo escondido, F3 sigue buscando")
+tamano(50, 30)
+r = w.RECT()
+u32.GetWindowRect(v, ctypes.byref(r))
+print("       (lo más pequeño que deja Windows: %d×%d)" % (r.right - r.left, r.bottom - r.top))
+tamano(900, 700)
+ok(con_titulo() and alto_de(barra_b) == fila_b and alto_de(panel_de(v)) == dos_filas and alto_de(barra_e) == fila_e,
+   "tamaño: al agrandarla vuelve todo, la barra de título la primera")
+cerrar_sin_guardar(pi, v)
+with open(INI, encoding="utf-8") as f:
+    ok("barra=1" in f.read(), "tamaño: lo elegido en «Ver» (la barra de estado) no ha cambiado")
+
+# --- M10 (1.4): cada ventana nueva, del color contrario a la de Bloc que está delante. ---
+u32.GetPropW.restype = ctypes.c_void_p
+u32.FindWindowExW.restype = w.HWND
+u32.FindWindowExW.argtypes = [w.HWND, w.HWND, w.LPCWSTR, w.LPCWSTR]
+
+
+def modo(v):
+    return {1: "claro", 2: "oscuro"}.get(u32.GetPropW(v, "BlocNoche") or 0, "sin modo")
+
+
+def ventanas_seguidas(ini, n):
+    with open(INI, "w", encoding="utf-8") as f:
+        f.write(ini)
+    abiertas = []
+    for k in range(n):
+        ruta = os.path.join(dir, "color-%d.txt" % k)
+        with open(ruta, "w", encoding="utf-8") as f:
+            f.write("ventana %d" % k)
+        abiertas.append(abrir(ruta))
+    modos = [modo(v) for _, v, _ in abiertas]
+    for pi, v, _ in reversed(abiertas):
+        cerrar_sin_guardar(pi, v)
+    return modos
+
+
+ok(ventanas_seguidas("noche=0\n", 3) == ["claro", "oscuro", "claro"], "color contrario: desde una clara, tres ventanas seguidas, alternando")
+with open(INI, encoding="utf-8") as f:
+    ok("noche=0" in f.read(), "color contrario: al cerrarlas, el modo guardado sigue siendo el de antes")
+ok(ventanas_seguidas("noche=1\n", 2) == ["oscuro", "claro"], "color contrario: desde una oscura, la siguiente clara")
+ok(ventanas_seguidas("noche=0\ncontrario=0\n", 2) == ["claro", "claro"], "color contrario: con la opción quitada, todas con el guardado")
+ok(ventanas_seguidas("noche=1\n", 1) == ["oscuro"], "color contrario: sin otra ventana, el modo guardado")
+t = time.perf_counter()
+for _ in range(100):
+    h = u32.FindWindowExW(None, None, "BlocVentana", None)
+    u32.GetPropW(h, "BlocNoche")
+ms = (time.perf_counter() - t) * 10
+ok(ms < 1, "color contrario: saber el color de la otra ventana cuesta %.3f ms" % ms)
+
 if len(sys.argv) > 3:   # una carpeta del NAS para probar el guardado en red
     ruta = os.path.join(sys.argv[3], "nas-prueba.md")
     with open(ruta, "wb") as f:

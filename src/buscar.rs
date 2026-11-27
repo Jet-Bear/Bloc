@@ -74,7 +74,7 @@ fn px(n: i32) -> i32 {
 }
 
 /// Una fila del panel: como la de la barra de botones, sin pasarse de su alto.
-fn fila() -> i32 {
+pub fn fila() -> i32 {
     px(36)
 }
 
@@ -133,12 +133,14 @@ fn sitios(ancho: i32) -> Sitios {
         medidas
     };
     let x0 = m + b + m;
-    let caja = (ancho - x0 - (3 * b + m) - (b + 2 * m)).clamp(px(160), px(420));
+    // Las casillas encogen lo que haga falta para que los botones quepan en una ventana estrecha (M3).
+    let caja = (ancho - x0 - (3 * b + m) - (b + 2 * m)).clamp(px(60), px(420));
+    let caja_por = caja.min(ancho - x0 - uno - todos - 3 * m).max(px(60));
     let que = r(x0, y0, caja);
     let x = que.right + m;
-    let botones = [r(m, y0, b), r(x, y0, b), r(x + b, y0, b), r(x + 2 * b, y0, b), r((ancho - m - b).max(x + 3 * b + m), y0, b), r(x0 + caja + m, y1, uno), r(x0 + caja + 2 * m + uno, y1, todos)];
+    let botones = [r(m, y0, b), r(x, y0, b), r(x + b, y0, b), r(x + 2 * b, y0, b), r((ancho - m - b).max(x + 3 * b + m), y0, b), r(x0 + caja_por + m, y1, uno), r(x0 + caja_por + 2 * m + uno, y1, todos)];
     let cuenta = RECT { left: que.right - px(8) - cuenta, top: y0, right: que.right - px(8), bottom: y0 + b };
-    Sitios { botones, que, por: r(x0, y1, caja), cuenta }
+    Sitios { botones, que, por: r(x0, y1, caja_por), cuenta }
 }
 
 /// Las casillas dentro de su recuadro, centradas en alto; la de buscar deja sitio a la cuenta.

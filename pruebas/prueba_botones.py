@@ -19,11 +19,13 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "prueba_azar.
     fuente = f.read()
 exec(compile(fuente[:fuente.index("hilo = threading.Thread")], "prueba_azar", "exec"))
 VK_TAB = 9
+u32.PostMessageW.argtypes = [w.HWND, w.UINT, w.WPARAM, w.LPARAM]  # noqa: F821
 
 BOTONES = {"negrita": NEGRITA, "cursiva": CURSIVA, "tachado": TACHADO, "código": CODIGO, "enlace": ENLACE,  # noqa: F821
            "H1": TITULO1, "H2": TITULO2, "H3": TITULO3, "viñetas": LISTA, "numerada": NUMERADA,  # noqa: F821
            "casillas": CASILLAS, "cita": CITA, "tabla": TABLA, "alinear": ALINEAR}  # noqa: F821
-TECLAS = {"intro": VK_RETURN, "retroceso": VK_BACK, "tab": VK_TAB, "supr": VK_DELETE, "izquierda": 0x25, "abajo": 0x28}  # noqa: F821
+TECLAS = {"intro": VK_RETURN, "retroceso": VK_BACK, "tab": VK_TAB, "supr": VK_DELETE, "izquierda": 0x25, "arriba": 0x26, "abajo": 0x28, "derecha": 0x27, "inicio": 0x24, "fin": 0x23,  # noqa: F821
+          "repág": 0x21, "avpág": 0x22, "insert": 0x2D}
 MENU = {"deshacer": DESHACER, "rehacer": REHACER, "ajuste": AJUSTE}  # noqa: F821
 GUARDAR = 1003
 CONMUTAN = {"negrita", "cursiva", "tachado", "código", "H1", "H2", "H3", "viñetas", "numerada", "casillas", "cita"}
@@ -35,6 +37,64 @@ CONMUTAN = {"negrita", "cursiva", "tachado", "código", "H1", "H2", "H3", "viñe
 T3 = "| Columna 1 | Columna 2 | Columna 3 |\n| --------- | --------- | --------- |\n|           |           |           |"
 T3_SEL = T3.replace("Columna 1", "⟦Columna 1⟧", 1)
 CASOS = [
+    # M1 (1.4): ↑ en la primera línea va al principio y ↓ en la última al final; con Mayús, la selección llega hasta ahí.
+    ("txt", 0, "Hola mu‸ndo\nadiós", "arriba", "‸Hola mundo\nadiós"),
+    ("txt", 0, "Hola\nadi‸ós", "abajo", "Hola\nadiós‸"),
+    ("txt", 2, "Hola mu‸ndo\nadiós", "arriba", "‸Hola mundo\nadiós"),
+    ("txt", 2, "Hola\nadi‸ós", "abajo", "Hola\nadiós‸"),
+    ("txt", 0, "Hola mu‸ndo\nadiós", "mayúsarriba", "⟦Hola mu⟧ndo\nadiós"),
+    ("txt", 0, "Hola\nadi‸ós", "mayúsabajo", "Hola\nadi⟦ós⟧"),
+    ("txt", 0, "uno\ndos‸", "arriba", "uno‸\ndos"),
+    ("txt", 0, "u‸no\ndos", "abajo", "uno\nd‸os"),
+    ("md", 0, "Hola mu‸ndo\n\nadiós", "arriba", "‸Hola mundo\n\nadiós"),
+    ("md", 0, "Hola\n\nadi‸ós", "abajo", "Hola\n\nadiós‸"),
+    ("md", 2, "Hola mu‸ndo\n\nadiós", "arriba", "‸Hola mundo\n\nadiós"),
+    ("md", 0, "Hola mu‸ndo\n\nadiós", "mayúsarriba", "⟦Hola mu⟧ndo\n\nadiós"),
+    ("md", 0, "| a | b‸ |\n| - | - |\n| 1 | 2 |", "arriba", "‸| a | b |\n| - | - |\n| 1 | 2 |"),
+    ("md", 0, "| a | b |\n| - | - |\n| 1‸ | 2 |", "abajo", "| a | b |\n| - | - |\n| 1 | 2 |‸"),
+    # M2 (1.4): el teclado al escribir. Moverse.
+    ("txt", 0, "Hola mundo‸", "ctrl-izquierda", "Hola ‸mundo"),
+    ("txt", 0, "‸Hola mundo", "ctrl-derecha", "Hola ‸mundo"),
+    ("txt", 0, "    sangr‸ado", "inicio", "    ‸sangrado"),
+    ("txt", 0, "    ‸sangrado", "inicio", "‸    sangrado"),
+    ("txt", 0, "‸    sangrado", "inicio", "    ‸sangrado"),
+    ("md", 1, "- elem‸ento", "inicio", "- ‸elemento"),
+    ("md", 1, "- ‸elemento", "inicio", "‸- elemento"),
+    ("md", 0, "- elem‸ento", "inicio", "- ‸elemento"),
+    ("md", 1, "1. elem‸ento", "inicio", "1. ‸elemento"),
+    ("md", 1, "> ci‸ta", "inicio", "> ‸cita"),
+    ("txt", 0, "Hola mu‸ndo", "fin", "Hola mundo‸"),
+    ("txt", 0, "uno\ndos‸", "ctrl-inicio", "‸uno\ndos"),
+    ("txt", 0, "u‸no\ndos", "ctrl-fin", "uno\ndos‸"),
+    ("txt", 0, "abcdef‸\nab\nabcdef", "abajo+abajo", "abcdef\nab\nabcdef‸"),
+    ("txt", 0, "‸uno\ndos\ntres", "avpág", "uno\ndos\ntres‸"),
+    ("txt", 0, "uno\ndos\ntr‸es", "repág", "‸uno\ndos\ntres"),
+    # Seleccionar.
+    ("txt", 0, "Hola mundo‸", "ctrl-mayús-izquierda", "Hola ⟦mundo⟧"),
+    ("txt", 0, "    sangr‸ado", "mayúsinicio", "    ⟦sangr⟧ado"),
+    ("txt", 0, "Hola mu‸ndo", "mayúsfin", "Hola mu⟦ndo⟧"),
+    ("txt", 0, "uno‸\ndos", "ctrl-A", "⟦uno\ndos⟧"),
+    ("txt", 0, "Hola ⟦mundo⟧", "pulsar:47", "Hola g‸"),
+    # Borrar.
+    ("txt", 0, "Hola mundo‸", "ctrl-retroceso", "Hola ‸"),
+    ("txt", 0, "‸Hola mundo", "ctrl-supr", "‸mundo"),
+    ("txt", 0, "Hola‸", "retroceso", "Hol‸"),
+    ("txt", 0, "‸Hola", "supr", "‸ola"),
+    # Intro.
+    ("txt", 0, "    sangrado‸", "intro", "    sangrado\n    ‸"),
+    ("md", 0, "1) uno‸", "intro", "1) uno\n2) ‸"),
+    ("md", 0, "* uno‸", "intro", "* uno\n* ‸"),
+    ("md", 0, "- [ ] uno‸", "intro", "- [ ] uno\n- [ ] ‸"),
+    # Teclado español: AltGr (Ctrl+Alt) escribe, ningún atajo de Bloc se lo come; acentos con tecla muerta.
+    ("md", 0, "Hola‸", "ctrl-alt-2", "Hola@‸"),
+    ("md", 0, "Hola‸", "ctrl-alt-3", "Hola#‸"),
+    ("md", 0, "Hola‸", "ctrl-alt-E", "Hola€‸"),
+    ("txt", 0, "Hola‸", "ctrl-alt-1", "Hola|‸"),
+    ("txt", 0, "‸", "pulsar:DE,41", "á‸"),
+    ("txt", 0, "‸", "pulsar:BA,45", "è‸"),
+    ("txt", 0, "‸", "pulsar:C0", "ñ‸"),
+    # Otros: Insert sobrescribe y vuelve a insertar.
+    ("txt", 0, "‸Hola", "insert+pulsar:58+insert+pulsar:59", "xy‸ola"),
     # Negrita, cursiva, tachado, código
     ("md", 0, "Hola ⟦mundo⟧ bonito", "negrita", "Hola **⟦mundo⟧** bonito"),
     ("md", 0, "Hola **mu‸ndo** bonito", "negrita", "Hola mu‸ndo bonito"),
@@ -376,26 +436,37 @@ class Bloc:
             u32.AttachThreadInput(yo, suyo, True)  # noqa: F821
             teclas = (ctypes.c_ubyte * 256)()
             u32.GetKeyboardState(teclas)  # noqa: F821
-            for k in [0x11] + ([0x10] if que.startswith("ctrl-mayús-") else []):
+            # «ctrl-alt-»: AltGr, que Windows da como Ctrl+Alt.
+            for k in [0x11] + ([0x10] if "-mayús-" in que else []) + ([0x12] if "-alt-" in que else []):
                 teclas[k] |= 0x80
             u32.SetKeyboardState(teclas)  # noqa: F821
             try:
-                u32.PostMessageW(self.e, WM_KEYDOWN, ord(que.rsplit("-", 1)[1]), 0)  # noqa: F821
+                nombre = que.rsplit("-", 1)[1]
+                vk = TECLAS[nombre] if nombre in TECLAS else ord(nombre.upper())
+                u32.PostMessageW(self.e, WM_KEYDOWN, vk, u32.MapVirtualKeyW(vk, 0) << 16 | 1)  # noqa: F821
                 time.sleep(0.3)
                 enviar(self.e, 0)  # noqa: F821
             finally:
-                teclas[0x11] &= 0x7F
-                teclas[0x10] &= 0x7F
+                for k in (0x10, 0x11, 0x12):
+                    teclas[k] &= 0x7F
                 u32.SetKeyboardState(teclas)  # noqa: F821
                 u32.AttachThreadInput(yo, suyo, False)  # noqa: F821
-        elif que in ("mayústab", "mayúsintro"):
+        elif que.startswith("pulsar:"):
+            # Teclas de verdad a la cola de Bloc (su TranslateMessage hace las letras, también los acentos con tecla
+            # muerta): «pulsar:DE,41» es ´ y luego a.
+            for vk in (int(x, 16) for x in que[7:].split(",")):
+                u32.PostMessageW(self.e, WM_KEYDOWN, vk, u32.MapVirtualKeyW(vk, 0) << 16 | 1)  # noqa: F821
+                u32.PostMessageW(self.e, 0x101, vk, u32.MapVirtualKeyW(vk, 0) << 16 | 0xC0000001)  # noqa: F821
+            time.sleep(0.3)
+            enviar(self.e, 0)  # noqa: F821
+        elif que in ("mayústab", "mayúsintro") or que.startswith("mayús") and que[5:] in TECLAS:
             # Bloc mira la tecla Mayúsculas con GetKeyState: se comparte el estado del teclado con su hilo y se pulsa.
             yo, suyo = k32.GetCurrentThreadId(), u32.GetWindowThreadProcessId(self.e, ctypes.byref(w.DWORD()))  # noqa: F821
             u32.AttachThreadInput(yo, suyo, True)  # noqa: F821
             teclas = (ctypes.c_ubyte * 256)()
             u32.GetKeyboardState(teclas); teclas[0x10] |= 0x80; u32.SetKeyboardState(teclas)  # noqa: F821
             try:
-                enviar(self.e, WM_KEYDOWN, VK_TAB if que == "mayústab" else VK_RETURN)  # noqa: F821
+                enviar(self.e, WM_KEYDOWN, VK_TAB if que == "mayústab" else VK_RETURN if que == "mayúsintro" else TECLAS[que[5:]])  # noqa: F821
             finally:
                 teclas[0x10] &= 0x7F; u32.SetKeyboardState(teclas)  # noqa: F821
                 u32.AttachThreadInput(yo, suyo, False)  # noqa: F821

@@ -67,6 +67,8 @@ pub const PARTES: usize = 5; // mensaje, posición, zoom, saltos, codificación
 
 pub struct Barras {
     pub botones: RefCell<Vec<Boton>>,
+    /// El botón «»» con los que no caben en la fila (vacío si caben todos).
+    mas: Cell<RECT>,
     encima: Cell<i32>,
     pulsado: Cell<i32>,
     partes: RefCell<[Vec<u16>; PARTES]>,
@@ -80,6 +82,7 @@ impl Barras {
     pub fn nuevas() -> Barras {
         Barras {
             botones: RefCell::new(Vec::new()),
+            mas: Cell::new(VACIO),
             encima: Cell::new(-1),
             pulsado: Cell::new(-1),
             partes: RefCell::new(Default::default()),
@@ -211,37 +214,65 @@ fn rellenar(dc: HDC, r: &RECT, color: u32) {
 
 // --- Barra de formato ---
 
-/// Coloca los botones en filas para este ancho y devuelve el alto que ocupan.
+const VACIO: RECT = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+/// El número que tiene «»» donde los botones tienen el suyo (encima, pulsado).
+const MAS: i32 = -2;
+
+/// Coloca los botones en una fila para este ancho y devuelve su alto. Los que no caben van al menú de «»», en su orden:
+/// la barra no crece hacia abajo (M3).
 pub fn alto_botones(ancho: i32) -> i32 {
     let b = barras();
     let mut v = b.botones.borrow_mut();
     let (w, alto, raya, borde) = (px(34), px(30), px(9), px(3));
-    // Los de la derecha, de derecha a izquierda en la primera fila; los demás, en filas con lo que queda.
+    // Los de la derecha, de derecha a izquierda; los demás, con lo que queda.
     let mut d = ancho - borde;
     for boton in v.iter_mut().rev().filter(|b| b.derecha) {
         d -= w;
         boton.rect = RECT { left: d, top: borde, right: d + w, bottom: borde + alto };
     }
-    let mut x = borde;
-    let mut y = borde;
-    for boton in v.iter_mut().filter(|b| !b.derecha) {
-        if boton.grupo && x > borde {
-            x += raya;
+    let fila = |v: &mut Vec<Boton>, limite: i32| {
+        let (mut x, mut todos) = (borde, true);
+        for boton in v.iter_mut().filter(|b| !b.derecha) {
+            let izq = if boton.grupo && x > borde { x + raya } else { x };
+            todos &= izq + w <= limite;
+            boton.rect = if todos { RECT { left: izq, top: borde, right: izq + w, bottom: borde + alto } } else { VACIO };
+            if todos {
+                x = izq + w;
+            }
         }
-        let limite = if y == borde { d } else { ancho - borde };
-        if x + w > limite && x > borde {
-            x = borde;
-            y += alto;
-        }
-        boton.rect = RECT { left: x, top: y, right: x + w, bottom: y + alto };
-        x += w;
+        (todos, x)
+    };
+    b.mas.set(VACIO);
+    if !fila(&mut v, d).0 {
+        let (_, x) = fila(&mut v, d - w);
+        b.mas.set(RECT { left: x, top: borde, right: x + w, bottom: borde + alto });
     }
     let dueno = crate::ventana::app().botones.get();
     for (i, boton) in v.iter().enumerate() {
         let mut ti = herramienta(dueno, i, boton);
         enviar(b.ayudas.get(), TTM_NEWTOOLRECTW, 0, &mut ti as *mut _ as isize);
     }
-    y + alto + borde + 1
+    alto + 2 * borde + 1
+}
+
+/// El menú de «»»: los botones que no caben, con su ayuda y marcados si lo seleccionado ya tiene su formato.
+fn menu_mas(h: HWND) {
+    let r = barras().mas.get();
+    let quedan: Vec<(u16, Vec<u16>, bool)> =
+        barras().botones.borrow().iter().filter(|b| !b.derecha && b.rect.right == 0).map(|b| (b.id, b.ayuda.clone(), b.activo)).collect();
+    unsafe {
+        let m = CreatePopupMenu();
+        for (id, ayuda, activo) in &quedan {
+            AppendMenuW(m, MF_STRING | if *activo { MF_CHECKED } else { MF_UNCHECKED }, *id as usize, ayuda.as_ptr());
+        }
+        let mut p = POINT { x: r.left, y: r.bottom };
+        ClientToScreen(h, &mut p);
+        let id = TrackPopupMenu(m, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, p.x, p.y, 0, h, std::ptr::null());
+        DestroyMenu(m);
+        if id != 0 {
+            enviar(GetParent(h), WM_COMMAND, id as usize, 0);
+        }
+    }
 }
 
 fn herramienta(dueno: HWND, i: usize, boton: &Boton) -> TTTOOLINFOW {
@@ -269,12 +300,21 @@ pub fn poner_botones(dueno: HWND, v: Vec<Boton>) {
     }
 }
 
+fn dentro(r: &RECT, x: i32, y: i32) -> bool {
+    x >= r.left && x < r.right && y >= r.top && y < r.bottom
+}
+
 fn boton_en(x: i32, y: i32) -> i32 {
-    barras().botones.borrow().iter().position(|b| x >= b.rect.left && x < b.rect.right && y >= b.rect.top && y < b.rect.bottom).map_or(-1, |i| i as i32)
+    if dentro(&barras().mas.get(), x, y) {
+        return MAS;
+    }
+    barras().botones.borrow().iter().position(|b| dentro(&b.rect, x, y)).map_or(-1, |i| i as i32)
 }
 
 fn invalidar_boton(h: HWND, i: i32) {
-    if i >= 0
+    if i == MAS {
+        unsafe { InvalidateRect(h, &barras().mas.get(), 0) };
+    } else if i >= 0
         && let Some(b) = barras().botones.borrow().get(i as usize) {
             unsafe { InvalidateRect(h, &b.rect, 0) };
         }
@@ -323,7 +363,9 @@ fn botones_mensaje(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             let antes = b.pulsado.replace(-1);
             unsafe { ReleaseCapture() };
             invalidar_boton(h, antes);
-            if antes >= 0 && boton_en(x, y) == antes {
+            if antes == MAS && boton_en(x, y) == MAS {
+                menu_mas(h);
+            } else if antes >= 0 && boton_en(x, y) == antes {
                 let id = b.botones.borrow()[antes as usize].id;
                 enviar(unsafe { GetParent(h) }, WM_COMMAND, id as usize, 0);
             }
@@ -347,7 +389,7 @@ fn pintar_botones(h: HWND, dc: HDC) {
         rellenar(mem, &RECT { top: rc.bottom - 1, ..rc }, p.borde);
         SetBkMode(mem, TRANSPARENT as i32);
         let fuentes = b.fuentes.borrow();
-        for (i, boton) in b.botones.borrow().iter().enumerate() {
+        for (i, boton) in b.botones.borrow().iter().enumerate().filter(|(_, b)| b.rect.right > 0) {
             let i = i as i32;
             if i == b.pulsado.get() || boton.activo {
                 rellenar(mem, &boton.rect, p.borde);
@@ -359,6 +401,16 @@ fn pintar_botones(h: HWND, dc: HDC) {
                 rellenar(mem, &RECT { left: x, right: x + 1, top: boton.rect.top + px(5), bottom: boton.rect.bottom - px(5) }, p.borde);
             }
             dibujar(mem, boton.icono, boton.rect, &fuentes, tema::texto_barra(b.noche.get()));
+        }
+        let mas = b.mas.get();
+        if mas.right > 0 {
+            if b.pulsado.get() == MAS {
+                rellenar(mem, &mas, p.borde);
+            } else if b.encima.get() == MAS {
+                rellenar(mem, &mas, p.resalte);
+            }
+            SetTextColor(mem, tema::texto_barra(b.noche.get()));
+            escribir(mem, fuentes[TITULO], &[0xBB], mas);
         }
         BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
         SelectObject(mem, viejo);
@@ -447,23 +499,34 @@ pub fn colocar_partes(h: HWND) -> bool {
     let antes = *rects;
     let hueco = px(10);
     let mut x = rc.right - px(4);
+    let mut anchos = [0; PARTES];
     unsafe {
         let dc = GetDC(h);
         let viejo = SelectObject(dc, fuente_ui() as _);
-        for i in (1..PARTES).rev() {
-            let mut w = medir(dc, &partes[i]).cx + 2 * hueco;
+        for (i, ancho) in anchos.iter_mut().enumerate().skip(1) {
+            *ancho = medir(dc, &partes[i]).cx + 2 * hueco;
             if i == 1 {
-                w = w.max(ancho_posicion(dc) + 2 * hueco);
+                *ancho = (*ancho).max(ancho_posicion(dc) + 2 * hueco);
             }
-            let previo = antes[i].right - antes[i].left;
-            if previo > w && antes[i].right == x {
-                w = previo;
-            }
-            rects[i] = RECT { left: x - w, top: 1, right: x, bottom: rc.bottom };
-            x -= w;
         }
         SelectObject(dc, viejo);
         ReleaseDC(h, dc);
+    }
+    // Las que no caben se esconden en vez de salirse por la izquierda (M3): el zoom, los saltos, la codificación y,
+    // la última, la posición.
+    for i in [2, 3, 4, 1] {
+        if anchos.iter().sum::<i32>() > x {
+            anchos[i] = 0;
+        }
+    }
+    for i in (1..PARTES).rev() {
+        let mut w = anchos[i];
+        let previo = antes[i].right - antes[i].left;
+        if w > 0 && previo > w && antes[i].right == x {
+            w = previo;
+        }
+        rects[i] = RECT { left: x - w, top: 1, right: x, bottom: rc.bottom };
+        x -= w;
     }
     rects[0] = RECT { left: 0, top: 1, right: x, bottom: rc.bottom };
     let igual = |a: &RECT, b: &RECT| (a.left, a.top, a.right, a.bottom) == (b.left, b.top, b.right, b.bottom);
@@ -523,6 +586,10 @@ fn pintar_estado(h: HWND, dc: HDC, recorte: &RECT) {
         let f = SelectObject(mem, fuente_ui() as _);
         let hueco = px(10);
         for (i, (r, t)) in b.rects.borrow().iter().zip(b.partes.borrow().iter()).enumerate() {
+            // Escondida porque no cabe (ver colocar_partes).
+            if i > 0 && r.right <= r.left {
+                continue;
+            }
             if i > 0 {
                 rellenar(mem, &RECT { left: r.left, right: r.left + 1, top: r.top + px(4), bottom: r.bottom - px(4) }, p.borde);
             }

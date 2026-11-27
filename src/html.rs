@@ -909,7 +909,7 @@ fn juntar(r: &mut String, x: &str) {
     r.push_str(x);
 }
 
-fn url(u: &str) -> String {
+pub fn url(u: &str) -> String {
     u.replace(' ', "%20").replace('(', "%28").replace(')', "%29")
 }
 
