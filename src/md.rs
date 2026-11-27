@@ -842,10 +842,18 @@ fn linea(
     tras_fila: bool,
     cerrada: Option<i32>,
     blando: bool,
+    (subrayado, bajo_titulo): (u8, bool),
     f: &mut Vec<u8>,
     p: &mut Vec<Par>,
 ) -> Parrafo {
-    let (tipo, contenido, fin_contenido) = analizar(s, abierto, f, p);
+    let (mut tipo, contenido, fin_contenido) = analizar(s, abierto, f, p);
+    if tipo == Tipo::Parrafo && subrayado > 0 {
+        tipo = Tipo::Titulo(subrayado as usize);
+    }
+    if bajo_titulo {
+        f.iter_mut().for_each(|x| *x |= MARCA);
+    }
+    let finos = if matches!(tipo, Tipo::Parrafo | Tipo::Titulo(_) | Tipo::Cita(_)) { adornos(s, f, contenido.min(s.len())) } else { Vec::new() };
     let mut par = parrafo(s, tipo, ocultar);
     // La raya `---` de la vista previa lleva 18 px por encima y por debajo: con las líneas en blanco de alrededor, la
     // suya casi no tiene alto. Al imprimir es su subrayado y necesita la línea entera.
@@ -897,6 +905,8 @@ fn linea(
         if matches!(tipo, Tipo::Parrafo | Tipo::Titulo(_) | Tipo::Cita(_)) {
             (contenido..fin_contenido.min(s.len())).filter(|&i| escondible(i)).for_each(|i| oculto[i] = true);
         }
+        // Las de un &nbsp;, en letras de un punto: juntas, miden lo que un espacio.
+        finos.iter().for_each(|&i| oculto[i] = false);
     }
     let diminuta = |i: usize| ocultar && escondible(i) && !oculto[i];
     let mut actual: Option<Estilo> = None;
@@ -943,6 +953,104 @@ fn linea(
         rtf.push(b'}');
     }
     par
+}
+
+fn inicio_de_linea(t: &[u16], pos: usize) -> usize {
+    t[..pos.min(t.len())].iter().rposition(|&c| c == CR).map_or(0, |k| k + 1)
+}
+
+/// Si la línea que empieza en `k` es un párrafo de una sola línea, que se hace título con una línea de = o de - debajo:
+/// sin lista, sin ser ella una línea de = y sin texto de párrafo justo encima.
+fn titulo_en(t: &[u16], k: usize) -> bool {
+    let k = k.min(t.len());
+    let l = &t[k..t[k..].iter().position(|&c| c == CR).map_or(t.len(), |j| k + j)];
+    let texto = |a: &[u16]| de_parrafo(a) && linea_de_titulo(a) != Some(1);
+    texto(l) && item(l).is_none() && (k == 0 || !texto(&t[inicio_de_linea(t, k - 1)..k - 1]))
+}
+
+/// Una línea que es solo una imagen, `![…](…)`: va sola, sin juntarse con las de al lado, y debajo lleva la imagen.
+pub fn solo_imagen(s: &[u16]) -> bool {
+    let n = s.len() - s.iter().rev().take_while(|&&c| espacio(c)).count();
+    let k = s[..n].iter().take_while(|&&c| espacio(c)).count();
+    let s = &s[k..n];
+    s.len() > 5 && es(s[0], b'!') && es(s[1], b'[') && es(s[s.len() - 1], b')') && s.windows(2).any(|w| es(w[0], b']') && es(w[1], b'('))
+}
+
+/// Una línea de = o de - (dos o más) con hasta tres espacios delante: debajo de un párrafo de una línea, lo hace título 1
+/// o 2, como en CommonMark.
+pub fn linea_de_titulo(s: &[u16]) -> Option<u8> {
+    let n = sangria(s);
+    let r = &s[n..s.len() - s.iter().rev().take_while(|&&c| espacio(c)).count().min(s.len() - n)];
+    if n > 3 || r.is_empty() {
+        None
+    } else if r.iter().all(|&c| es(c, b'=')) {
+        Some(1)
+    } else if r.len() >= 2 && r.iter().all(|&c| es(c, b'-')) {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// M6: lo que se ve de las entidades, de `<br>` y de las notas al pie, fuera del código. `&amp;` es su `&`; las demás
+/// entidades y `<br>`, en color de acento; de una nota (`[^1]`, y su `[^1]:` al principio de la línea), su nombre en
+/// color de acento y sin corchetes. Devuelve los caracteres de los `&nbsp;`, marcas que con las marcas ocultas van en
+/// letras de un punto: juntas, miden lo que un espacio.
+fn adornos(s: &[u16], f: &mut [u8], desde: usize) -> Vec<usize> {
+    let libre = |f: &[u8], a: usize, b: usize| f[a..b].iter().all(|&x| x & (CODIGO | PROTEGIDO) == 0);
+    let alfa = |c: u16| (c as u32) < 128 && (c as u8).is_ascii_alphanumeric();
+    let mut finos = Vec::new();
+    let mut i = desde;
+    while i < s.len() {
+        let c = s[i];
+        if es(c, b'&')
+            && let Some(k) = s[i + 1..s.len().min(i + 12)].iter().position(|&x| es(x, b';'))
+            && k > 0
+            && s[i + 1..i + 1 + k].iter().enumerate().all(|(j, &x)| alfa(x) || j == 0 && es(x, b'#'))
+            && libre(f, i, i + k + 2)
+        {
+            let nombre = String::from_utf16_lossy(&s[i + 1..i + 1 + k]);
+            match nombre.as_str() {
+                "amp" => f[i + 1..i + k + 2].iter_mut().for_each(|x| *x |= MARCA),
+                "nbsp" => {
+                    f[i..i + k + 2].iter_mut().for_each(|x| *x |= MARCA);
+                    finos.extend(i..i + k + 2);
+                }
+                _ => f[i..i + k + 2].iter_mut().for_each(|x| *x |= ACENTO),
+            }
+            i += k + 2;
+            continue;
+        }
+        if es(c, b'<') {
+            let resto = String::from_utf16_lossy(&s[i..s.len().min(i + 6)]).to_ascii_lowercase();
+            let largo = ["<br />", "<br/>", "<br>"].iter().find(|b| resto.starts_with(*b)).map_or(0, |b| b.len());
+            if largo > 0 && libre(f, i, i + largo) {
+                f[i..i + largo].iter_mut().for_each(|x| *x |= ACENTO);
+                i += largo;
+                continue;
+            }
+        }
+        if es(c, b'[')
+            && s.get(i + 1).is_some_and(|&x| es(x, b'^'))
+            && let Some(k) = s[i + 2..s.len().min(i + 34)].iter().position(|&x| es(x, b']'))
+            && k > 0
+            && s[i + 2..i + 2 + k].iter().all(|&x| alfa(x) || es(x, b'-') || es(x, b'_'))
+            && libre(f, i, i + k + 3)
+        {
+            let cierre = i + 2 + k;
+            f[i] |= MARCA;
+            f[i + 1] |= MARCA;
+            f[i + 2..cierre].iter_mut().for_each(|x| *x |= ACENTO);
+            f[cierre] |= MARCA;
+            if i == desde && s.get(cierre + 1).is_some_and(|&x| es(x, b':')) {
+                f[cierre + 1] |= MARCA;
+            }
+            i = cierre + 1;
+            continue;
+        }
+        i += 1;
+    }
+    finos
 }
 
 /// Lo que avanza el espacio de Segoe UI (y de Segoe UI Semibold), en cuadratines.
@@ -1036,7 +1144,7 @@ const MAX_JUNTAS: usize = 200;
 fn salto_blando(l: &[u16], m: &[u16], lista: Option<EnLista>) -> bool {
     let texto = |s: &[u16]| tipo_de_bloque(s) == Tipo::Parrafo && !s.iter().all(|&c| espacio(c));
     // Dos espacios o una \ al final parten la línea, y una línea de = debajo hace título al párrafo.
-    if l.ends_with(&[32, 32]) || l.last() == Some(&(b'\\' as u16)) || m.iter().all(|&c| es(c, b'=') || espacio(c)) {
+    if l.ends_with(&[32, 32]) || l.last() == Some(&(b'\\' as u16)) || m.iter().all(|&c| es(c, b'=') || espacio(c)) || solo_imagen(l) || solo_imagen(m) {
         return false;
     }
     // Dos líneas de texto de la misma cita, sin listas.
@@ -1102,7 +1210,12 @@ pub fn pintar(c: &Colores, texto: &[u16], ini: usize, fin: usize, mut abierto: O
         let siguiente = lineas.peek().copied().or_else(|| texto.get(fin + 1..).map(|r| r.split(|&ch| ch == CR).next().unwrap_or(&[])));
         let cabecera = fila(l) && siguiente.is_some_and(|x| x.contains(&(b'|' as u16)) && separador(x));
         let cerrada = cerradas.binary_search_by_key(&(ini + pos), |x| x.0).ok().map(|k| cerradas[k].1);
-        let mut par = linea(&mut rtf, &mut tramos, pos, l, &mut abierto, &mut lista, ocultar, imprimir, cabecera, tras_fila, cerrada, blando, &mut f, &mut p);
+        // Un párrafo de una línea con === o --- debajo es un título 1 o 2, y la línea de = son sus marcas (M6). La de
+        // guiones sigue siendo la raya, que ya se ve como la de debajo de un título. Las líneas de al lado, del texto
+        // entero: lo pintado puede empezar en la de = o justo debajo del título.
+        let subrayado = if abierto.is_none() && titulo_en(texto, ini + pos) { siguiente.and_then(linea_de_titulo).unwrap_or(0) } else { 0 };
+        let bajo_titulo = abierto.is_none() && linea_de_titulo(l) == Some(1) && ini + pos > 0 && titulo_en(texto, inicio_de_linea(texto, ini + pos - 1));
+        let mut par = linea(&mut rtf, &mut tramos, pos, l, &mut abierto, &mut lista, ocultar, imprimir, cabecera, tras_fila, cerrada, blando, (subrayado, bajo_titulo), &mut f, &mut p);
         cola = tramos.last().filter(|t| t.1 == pos + l.len() && t.2.tam == 2 && !t.2.oculto).map_or(0, |t| t.1 - t.0);
         // Un título pegado a lo de encima lleva el hueco de la vista previa (24 px) que, si no, da su línea en blanco.
         if par.sencillo && anterior.map(|x| x.0).or(previa).is_some_and(|a| !a.iter().all(|&c| espacio(c))) {
@@ -1677,6 +1790,18 @@ mod pruebas {
     use super::*;
 
     const COLORES: Colores = Colores { texto: 1, apagado: 2, acento: 3, fondo_codigo: 4, cita: 5, fondo: 6, rejilla: 7, raya: 8, fondo_cita: 9, barra_cita: 10 };
+
+    #[test]
+    fn titulos_subrayados_de_una_linea() {
+        let t = u("A\r===\rB\r===\r\runo\rdos\r---\r---\rtitle: x\rtags: y\r---");
+        let en = |s: &str| t.windows(s.len()).position(|w| w == u(s).as_slice()).unwrap();
+        assert!(titulo_en(&t, 0) && titulo_en(&t, en("B")), "tras la línea de = de otro título, otro título");
+        assert!(titulo_en(&t, en("uno")) && !titulo_en(&t, en("dos")), "de un párrafo de dos líneas, ninguna es título");
+        assert!(titulo_en(&t, en("title")) && !titulo_en(&t, en("tags")), "una cabecera YAML no saca títulos");
+        assert!(!titulo_en(&t, en("===")), "la línea de = no es título");
+        assert!(solo_imagen(&u("  ![a](b.png) ")) && !solo_imagen(&u("Figura ![a](b.png)")) && !solo_imagen(&u("![a]")));
+        assert!(!salto_blando(&u("Figura 1:"), &u("![](a.png)"), None) && !salto_blando(&u("![](a.png)"), &u("![](b.png)"), None));
+    }
 
     // Lo que queda del RTF como texto: así se comprueba que el formato nunca cambia lo escrito.
     fn texto_de(rtf: &[u8]) -> Vec<u16> {

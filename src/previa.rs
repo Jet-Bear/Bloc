@@ -676,7 +676,7 @@ fn leer(flujo: &Com) -> (Vec<u8>, String) {
     while b.len() < TOPE {
         let mut n = 0u32;
         let r = unsafe { leer(flujo.0, trozo.as_mut_ptr() as *mut c_void, trozo.len() as u32, &mut n) };
-        b.extend_from_slice(&trozo[..n as usize]);
+        b.extend_from_slice(&trozo[..(n as usize).min(trozo.len())]);
         if r != 0 || n == 0 {
             entero = r >= 0;
             break;

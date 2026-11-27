@@ -439,7 +439,7 @@ def pruebas():
             ("uno de una subcarpeta, con espacios y paréntesis", [dos], "[dos (2).md](sub/dos%20%282%29.md)"),
             ("una imagen", [foto], "![foto.png](foto.png)"),
             ("una carpeta", [sub], "[sub](sub)"),
-            ("uno de fuera, con la ruta completa", [fuera_de], "[win.ini](%s)" % fuera_de),
+            ("uno de fuera, con la ruta completa", [fuera_de], "[win.ini](%s)" % fuera_de.replace("\\", "/")),
             ("varios, en su orden y uno por línea", [foto, uno, sub], "![foto.png](foto.png)\r\n[uno.txt](uno.txt)\r\n[sub](sub)")):
         u32.SendMessageW(e, EM_SETSEL, 0, 0)
         with en_portapapeles(archivos(*rutas)):
@@ -465,7 +465,7 @@ def pruebas():
     pi, v, e = abrir(None)
     with en_portapapeles(archivos(uno)):
         u32.SendMessageW(v, WM_COMMAND, PEGAR, 0)
-    ok(texto(e) == "[uno.txt](%s)" % uno.replace(" ", "%20"), "archivos, .md sin guardar: con la ruta completa (%r)" % texto(e)[:80])
+    ok(texto(e) == "[uno.txt](%s)" % uno.replace(" ", "%20").replace("\\", "/"), "archivos, .md sin guardar: con la ruta completa (%r)" % texto(e)[:80])
     ok(cerrar_sin_guardar(pi, v), "archivos, .md sin guardar: se cierra bien")
     with open(INI, "w") as f:
         f.write("ajuste=1\nbarra=1\nmax=0\nzoom=100\nnoche=0\n")

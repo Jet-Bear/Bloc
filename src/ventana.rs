@@ -225,6 +225,19 @@ pub struct App {
     /// El modo de noche guardado, mientras esta ventana lleva el contrario al de otra (M10): es el que se guarda al
     /// cerrar, salvo que se cambie a mano.
     noche_guardada: Cell<Option<bool>>,
+    /// M6: las imágenes de los `![…](ruta)` del documento, por su ruta, y el zoom y el ancho con que se colocaron.
+    imagenes: RefCell<HashMap<PathBuf, Dibujo>>,
+    clave_imagenes: Cell<Option<tabla::Clave>>,
+    /// Cuántas veces se han soltado: lo que cargue un hilo de una vez anterior no vale.
+    vez_imagenes: Cell<u32>,
+}
+
+/// Una imagen de un .md: cargándose en otro hilo, lista (su mapa de bits, su tamaño y el de la última vez que se
+/// escaló para dibujarla) o que no se puede ver.
+enum Dibujo {
+    Cargando,
+    Lista { mapa: usize, ancho: i32, alto: i32, escalada: Option<(i32, usize)> },
+    Falla,
 }
 
 /// Lo que deja la escritura del archivo para la ventana.
@@ -242,6 +255,17 @@ const WM_GUARDADO: u32 = WM_APP + 1;
 const WM_TABLAS: u32 = WM_APP + 2;
 /// Volver a esconder las marcas de los párrafos de los que ha salido la selección (ver `tapar`).
 const WM_TAPAR: u32 = WM_APP + 3;
+/// Hay imágenes de un .md en `CARGADAS`, o hay otro zoom o ancho: se vuelven a colocar las líneas de las imágenes (M6).
+const WM_IMAGEN: u32 = WM_APP + 7;
+/// Una imagen cargada en otro hilo: en qué tanda (`vez_imagenes`), su ruta y, si se puede ver, su mapa de bits (como
+/// número), ancho y alto.
+type Cargada = (u32, PathBuf, Option<(usize, i32, i32)>);
+/// Las que han cargado los hilos, para el siguiente WM_IMAGEN: por el mensaje solo va el aviso, no un puntero.
+static CARGADAS: std::sync::Mutex<Vec<Cargada>> = std::sync::Mutex::new(Vec::new());
+/// Lo que pueden ocupar juntas las imágenes cargadas de los .md; las que no quepan se quedan en texto.
+const TOPE_IMAGENES: i64 = 256 << 20;
+/// Cuántas se cargan a la vez como mucho: las demás, cuando acabe una.
+const CARGANDO_A_LA_VEZ: usize = 4;
 
 static APP: AtomicPtr<App> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -310,6 +334,9 @@ fn nueva_app() -> &'static App {
         pareja: Cell::new(None),
         vista: Cell::new(false),
         noche_guardada: Cell::new(None),
+        imagenes: RefCell::new(HashMap::new()),
+        clave_imagenes: Cell::new(None),
+        vez_imagenes: Cell::new(0),
     }));
     APP.store(a, Ordering::SeqCst);
     a
@@ -621,6 +648,18 @@ fn mensaje_ventana(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 WA_CLICKACTIVE => "ventana:activa por clic",
                 _ => "ventana:activa",
             });
+            // Una imagen que no estaba puede estar ahora (se ha copiado al volver del Explorador): se vuelve a probar.
+            if (wp & 0xFFFF) as u32 != WA_INACTIVE {
+                let fallidas: std::collections::HashSet<PathBuf> = {
+                    let mut imagenes = a.imagenes.borrow_mut();
+                    let v = imagenes.iter().filter(|x| matches!(x.1, Dibujo::Falla)).map(|x| x.0.clone()).collect();
+                    imagenes.retain(|_, d| !matches!(d, Dibujo::Falla));
+                    v
+                };
+                if !fallidas.is_empty() {
+                    colocar_imagenes(Some(&fallidas));
+                }
+            }
             unsafe { DefWindowProcW(h, m, wp, lp) }
         }
         WM_COMMAND => {
@@ -661,6 +700,34 @@ fn mensaje_ventana(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         }
         WM_TABLAS => {
             mirar_tablas();
+            0
+        }
+        WM_IMAGEN => {
+            let hechas = std::mem::take(&mut *CARGADAS.lock().unwrap_or_else(|e| e.into_inner()));
+            let mut nuevas = std::collections::HashSet::new();
+            let mut imagenes = a.imagenes.borrow_mut();
+            for (vez, ruta, cargada) in hechas {
+                // De antes de soltarlas (otro documento, otro fondo): ya no valen.
+                if vez != a.vez_imagenes.get() {
+                    if let Some((mapa, ..)) = cargada {
+                        unsafe { DeleteObject(mapa as _) };
+                    }
+                    continue;
+                }
+                let usado: i64 = imagenes.values().map(|d| if let Dibujo::Lista { ancho, alto, .. } = d { *ancho as i64 * *alto as i64 * 4 } else { 0 }).sum();
+                let d = match cargada {
+                    Some((mapa, ancho, alto)) if usado + ancho as i64 * alto as i64 * 4 <= TOPE_IMAGENES => Dibujo::Lista { mapa, ancho, alto, escalada: None },
+                    Some((mapa, ..)) => {
+                        unsafe { DeleteObject(mapa as _) };
+                        Dibujo::Falla
+                    }
+                    None => Dibujo::Falla,
+                };
+                imagenes.insert(ruta.clone(), d);
+                nuevas.insert(ruta);
+            }
+            drop(imagenes);
+            colocar_imagenes(if lp == 0 { None } else { Some(&nuevas) });
             0
         }
         WM_TAPAR => {
@@ -1413,6 +1480,9 @@ fn cargar_como(texto: Vec<u16>, ruta: Option<PathBuf>, cod: Cod, saltos: Saltos,
     a.marca.set((0, 1, 0));
     a.sel_antes.set(0);
     *a.nuevo.borrow_mut() = Vec::new();
+    // Antes de pintar: las imágenes de un .md se buscan en su carpeta.
+    *a.ruta.borrow_mut() = ruta;
+    soltar_imagenes();
     if vivo {
         a.hay_vallas.set(md::hay_valla(&leido));
         a.vallas_en.borrow_mut().clear();
@@ -1422,7 +1492,6 @@ fn cargar_como(texto: Vec<u16>, ruta: Option<PathBuf>, cod: Cod, saltos: Saltos,
         *a.copia.borrow_mut() = Vec::new();
     }
     editor::seleccionar(ed, 0, 0);
-    *a.ruta.borrow_mut() = ruta;
     a.cod.set(cod);
     a.saltos.set(saltos);
     a.nulos.set(nulos);
@@ -1899,7 +1968,6 @@ pub fn deshacer_propio() -> bool {
     app().vivo.get()
 }
 
-/// Lo copiado con formato se pega convertido en Markdown en los .md, salvo dentro de un bloque de código.
 /// Lo que se pega de unos archivos copiados en el Explorador, uno por línea y en su orden. En un .md (con formato), un
 /// enlace a cada uno, `![nombre](ruta)` si es una imagen; la ruta, relativa al .md si está en su carpeta o debajo, y
 /// escrita como en un enlace de HTML pegado. Si no, su ruta completa. Nada se copia ni se mueve.
@@ -1917,12 +1985,12 @@ pub fn archivos_al_pegar(rutas: &[Vec<u16>], con_formato: bool) -> Vec<u16> {
             let nombre = ruta.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let destino = match carpeta.as_ref().and_then(|c| ruta.strip_prefix(c).ok()) {
                 Some(dentro) => dentro.to_string_lossy().replace('\\', "/"),
-                None => ruta.to_string_lossy().into_owned(),
+                None => ruta.to_string_lossy().replace('\\', "/"),
             };
             let ext = ruta.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
             let imagen = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico");
             let nombre = nombre.replace('[', "\\[").replace(']', "\\]");
-            format!("{}[{nombre}]({})", if imagen { "!" } else { "" }, crate::html::url(&destino)).encode_utf16().collect()
+            format!("{}[{nombre}]({})", if imagen { "!" } else { "" }, crate::html::url(&destino.replace('%', "%25"))).encode_utf16().collect()
         })
         .collect();
     lineas.join(&CR)
@@ -1943,7 +2011,7 @@ pub fn imagen_al_pegar(im: &crate::imagen::Imagen) {
     let Some(ruta) = a.ruta.borrow().clone() else { return };
     match crate::imagen::guardar_junto(&ruta, im) {
         Ok(nombre) => {
-            let enlace: Vec<u16> = format!("![]({})", crate::html::url(&nombre)).encode_utf16().collect();
+            let enlace: Vec<u16> = format!("![]({})", crate::html::url(&nombre.replace('%', "%25"))).encode_utf16().collect();
             cortar_deshacer();
             editor::editando(|| editor::sustituir(a.ed.get(), &enlace));
             cortar_deshacer();
@@ -1954,6 +2022,7 @@ pub fn imagen_al_pegar(im: &crate::imagen::Imagen) {
     }
 }
 
+/// Lo copiado con formato se pega convertido en Markdown en los .md, salvo dentro de un bloque de código.
 pub fn pegar_con_formato() -> bool {
     let a = app();
     if !a.md.get() {
@@ -2189,6 +2258,14 @@ fn procesar(anotar: bool) {
                 ln = fin_linea(&nuevo, ln + 1);
                 if lv < copia.len() {
                     lv = fin_linea(&copia, lv + 1);
+                }
+                // Y la de = de debajo de esa: si la línea de después deja de ser un título (tiene texto encima), sus = se
+                // ven.
+                if ln < nuevo.len() && md::linea_de_titulo(&nuevo[ln + 1..fin_linea(&nuevo, ln + 1)]) == Some(1) {
+                    ln = fin_linea(&nuevo, ln + 1);
+                    if lv < copia.len() {
+                        lv = fin_linea(&copia, lv + 1);
+                    }
                 }
             }
             if !a.cfg.borrow().marcas {
@@ -2454,6 +2531,7 @@ fn pintar(ini: usize, fin: usize) {
                 }
                 _ => md::Parrafo::default(),
             };
+            let par = hueco_de_imagen(l, par);
             if por_rtf && l < ultima && par == md::Parrafo::default() {
                 poner(grupo.take());
             } else {
@@ -3004,6 +3082,247 @@ pub fn dibujar_tablas(h: HWND) {
     }
 }
 
+// --- M6: las imágenes de un .md, debajo de su línea ---
+
+/// Con las marcas ocultas y fuera de la vista previa (que solo tiene el flujo, no la carpeta) y de la impresión.
+fn con_imagenes() -> bool {
+    let a = app();
+    a.vivo.get() && !a.cfg.borrow().marcas && !imprimiendo() && !a.vista.get()
+}
+
+/// La ruta de la imagen de una línea que es solo `![…](ruta)`: local, relativa a la carpeta del documento o completa.
+/// Las de internet, nunca: se queda el texto. Tampoco las de otro equipo de la red (`\\equipo\...`) que no sea el del
+/// documento: con solo abrir el .md, Windows le mandaría a ese equipo las credenciales de quien lo abre.
+fn imagen_de_linea(l: &[u16]) -> Option<PathBuf> {
+    if !md::solo_imagen(l) {
+        return None;
+    }
+    ruta_de_imagen(&String::from_utf16_lossy(l), app().ruta.borrow().as_deref())
+}
+
+fn ruta_de_imagen(s: &str, doc: Option<&Path>) -> Option<PathBuf> {
+    let (_, resto) = s.trim().strip_prefix("![")?.split_once("](")?;
+    let ruta = resto.strip_suffix(')')?.split(" \"").next()?.trim();
+    if ruta.is_empty() || ruta.contains(':') && !ruta.chars().nth(1).is_some_and(|c| c == ':') {
+        return None;
+    }
+    let ruta = ruta.replace("%20", " ").replace("%28", "(").replace("%29", ")").replace("%25", "%").replace('/', "\\");
+    let p = PathBuf::from(ruta);
+    let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico") {
+        return None;
+    }
+    let p = if p.is_absolute() { p } else { doc?.parent()?.join(p) };
+    let p = std::path::absolute(p).ok()?;
+    let equipo = |p: &Path| match p.components().next() {
+        Some(std::path::Component::Prefix(x)) => match x.kind() {
+            std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_) => Some(None),
+            std::path::Prefix::UNC(e, _) | std::path::Prefix::VerbatimUNC(e, _) => Some(Some(e.to_ascii_lowercase())),
+            _ => None,
+        },
+        _ => None,
+    };
+    match equipo(&p)? {
+        None => Some(p),
+        Some(e) => (doc.and_then(equipo) == Some(Some(e))).then_some(p),
+    }
+}
+
+/// Lo más grande que se ve una imagen, en píxeles: lo ancho del texto, contando siempre con la barra de desplazamiento
+/// (si no, una imagen ancha la haría aparecer y desaparecer sin parar), y lo alto que deja el espacio después de un
+/// párrafo de RichEdit (1.584 puntos), con el zoom.
+fn caja_imagenes() -> (i32, i32) {
+    let h = app().ed.get();
+    let r = editor::formato(h);
+    let barra = if unsafe { GetWindowLongW(h, GWL_STYLE) } as u32 & WS_VSCROLL != 0 { 0 } else { unsafe { GetSystemMetrics(SM_CXVSCROLL) } };
+    let (z, ppp, _) = clave_tablas();
+    ((r.right - r.left - px(4) - barra).max(px(16)), (31_680 * ppp as i64 * z.max(1) as i64 / (1440 * 100)) as i32 - px(8))
+}
+
+/// El tamaño con que se ve, en píxeles: el suyo, dentro de `caja_imagenes`. Nada mientras se carga (la primera vez se
+/// manda cargar en otro hilo, como mucho CARGANDO_A_LA_VEZ) o si no se puede ver.
+fn tamano_imagen(ruta: &Path) -> Option<(i32, i32)> {
+    let a = app();
+    let caja = caja_imagenes();
+    let mut imagenes = a.imagenes.borrow_mut();
+    match imagenes.get(ruta) {
+        Some(Dibujo::Lista { ancho, alto, .. }) => Some(encajar((*ancho, *alto), caja)),
+        Some(_) => None,
+        None if imagenes.values().filter(|d| matches!(d, Dibujo::Cargando)).count() >= CARGANDO_A_LA_VEZ => None,
+        None => {
+            imagenes.insert(ruta.to_path_buf(), Dibujo::Cargando);
+            let (v, r, fondo, vez) = (a.hwnd.get() as usize, ruta.to_path_buf(), tema::colores_md(en_oscuro()).fondo, a.vez_imagenes.get());
+            // Reducida a lo que cabe en la pantalla: no se guarda entera una foto que se ve a lo ancho del texto.
+            let pantalla = unsafe { (GetSystemMetrics(SM_CXVIRTUALSCREEN), 2 * GetSystemMetrics(SM_CYVIRTUALSCREEN)) };
+            std::thread::spawn(move || {
+                let cargada = crate::imagen::cargar(&r, fondo, pantalla);
+                CARGADAS.lock().unwrap_or_else(|e| e.into_inner()).push((vez, r, cargada));
+                unsafe { PostMessageW(v as HWND, WM_IMAGEN, 0, 1) };
+            });
+            None
+        }
+    }
+}
+
+/// (ancho, alto) a escala, sin pasar de `caja` en ninguno de los dos.
+fn encajar((w, h): (i32, i32), (mw, mh): (i32, i32)) -> (i32, i32) {
+    let (w, h) = (w.max(1) as i64, h.max(1) as i64);
+    let (mw, mh) = (mw.max(1) as i64, mh.max(1) as i64);
+    if w <= mw && h <= mh {
+        return (w as i32, h as i32);
+    }
+    if w * mh >= h * mw { (mw as i32, (h * mw / w).max(1) as i32) } else { ((w * mh / h).max(1) as i32, mh as i32) }
+}
+
+/// Todas fuera, con sus mapas de bits: al abrir otro documento o cambiar el fondo.
+fn soltar_imagenes() {
+    let a = app();
+    a.vez_imagenes.set(a.vez_imagenes.get().wrapping_add(1));
+    for (_, d) in a.imagenes.borrow_mut().drain() {
+        if let Dibujo::Lista { mapa, escalada, .. } = d {
+            unsafe { DeleteObject(mapa as _) };
+            if let Some((_, e)) = escalada {
+                unsafe { DeleteObject(e as _) };
+            }
+        }
+    }
+}
+
+/// El párrafo de una línea con una imagen ya cargada, con su hueco debajo (espacio después, en twips con el zoom).
+fn hueco_de_imagen(l: usize, mut par: md::Parrafo) -> md::Parrafo {
+    if par.codigo || !con_imagenes() {
+        return par;
+    }
+    let ruta = {
+        let c = app().copia.borrow();
+        imagen_de_linea(&c[l.min(c.len())..fin_linea(&c, l.min(c.len()))])
+    };
+    if let Some((_, alto)) = ruta.as_deref().and_then(tamano_imagen) {
+        let (z, ppp, _) = clave_tablas();
+        par.despues = par.despues.max(((alto + px(8)) as i64 * 1440 * 100 / (ppp as i64 * z.max(1) as i64)) as i32);
+    }
+    par
+}
+
+/// Las líneas de imagen, colocadas otra vez: las de `solo` (las recién cargadas) o, sin `solo`, todas (otro zoom o
+/// ancho). A las demás se les pregunta el tamaño, para que empiecen a cargar las que esperaban su turno.
+fn colocar_imagenes(solo: Option<&std::collections::HashSet<PathBuf>>) {
+    if !con_imagenes() {
+        return;
+    }
+    let lineas: Vec<(usize, usize, PathBuf)> = {
+        let c = app().copia.borrow();
+        let mut v = Vec::new();
+        let mut l = 0;
+        while l < c.len() {
+            let f = fin_linea(&c, l);
+            if let Some(ruta) = imagen_de_linea(&c[l..f]) {
+                v.push((l, f, ruta));
+            }
+            l = f + 1;
+        }
+        v
+    };
+    for (l, f, ruta) in lineas {
+        if solo.is_none_or(|s| s.contains(&ruta)) {
+            pintar(l, f);
+        } else {
+            tamano_imagen(&ruta);
+        }
+    }
+}
+
+/// Las imágenes de lo que se ve, en el hueco de debajo de su línea, encima de lo que ha pintado RichEdit. Solo donde
+/// está el hueco: una línea de imagen dentro de un bloque de código, o juntada con otra, no lo tiene.
+pub fn dibujar_imagenes(h: HWND) {
+    let a = app();
+    if !con_imagenes() {
+        return;
+    }
+    let clave = clave_tablas();
+    if a.clave_imagenes.replace(Some(clave)).is_some_and(|k| k != clave) {
+        unsafe { PostMessageW(a.hwnd.get(), WM_IMAGEN, 0, 0) };
+        return;
+    }
+    let Ok(c) = a.copia.try_borrow() else { return };
+    if c.len() != editor::largo(h) {
+        return;
+    }
+    let r = editor::formato(h);
+    let (desde, hasta) = editor::lineas_visibles(h, 400);
+    let mut l = inicio_linea(&c, desde.min(c.len()));
+    let mut lineas = Vec::new();
+    while l < hasta.min(c.len()) {
+        let f = fin_linea(&c, l);
+        if let Some(ruta) = imagen_de_linea(&c[l..f]) {
+            lineas.push((l, f, ruta));
+        }
+        l = f + 1;
+    }
+    let n = c.len();
+    drop(c);
+    let mut sitios = Vec::new();
+    for (l, f, ruta) in lineas {
+        let Some((w, alto)) = tamano_imagen(&ruta) else { continue };
+        let p = editor::posicion(h, l);
+        // Lo de abajo del hueco: donde empieza la línea siguiente o, en la última, lo de abajo de la suya, que ya cuenta
+        // el espacio después.
+        let bajo = if f < n {
+            if !editor::colocada(h, f + 1) {
+                continue;
+            }
+            let sig = editor::posicion(h, f + 1).y;
+            if sig - p.y < alto + px(16) {
+                continue;
+            }
+            sig
+        } else {
+            let Some(y) = editor::bajo_de_linea(h, f) else { continue };
+            y
+        };
+        if p.y > r.bottom {
+            break;
+        }
+        sitios.push((ruta, p.x, bajo - alto - px(4), w, alto));
+    }
+    if sitios.is_empty() {
+        return;
+    }
+    let mut imagenes = a.imagenes.borrow_mut();
+    unsafe {
+        let dc = GetDC(h);
+        let guardado = SaveDC(dc);
+        IntersectClipRect(dc, r.left, r.top, r.right, r.bottom);
+        let mem = CreateCompatibleDC(dc);
+        for (ruta, x, y, w, alto) in sitios {
+            let Some(Dibujo::Lista { mapa, ancho, alto: alto0, escalada }) = imagenes.get_mut(&ruta) else { continue };
+            // Escalada una vez por ancho: dibujarla no la vuelve a escalar en cada pintado.
+            if escalada.is_none_or(|(e, _)| e != w) {
+                if let Some((_, viejo)) = escalada.take() {
+                    DeleteObject(viejo as _);
+                }
+                let nuevo = CreateCompatibleBitmap(dc, w, alto);
+                let origen = CreateCompatibleDC(dc);
+                let a0 = SelectObject(origen, *mapa as _);
+                let a1 = SelectObject(mem, nuevo as _);
+                SetStretchBltMode(mem, HALFTONE);
+                StretchBlt(mem, 0, 0, w, alto, origen, 0, 0, *ancho, *alto0, SRCCOPY);
+                SelectObject(mem, a1);
+                SelectObject(origen, a0);
+                DeleteDC(origen);
+                *escalada = Some((w, nuevo as usize));
+            }
+            let Some((_, bmp)) = *escalada else { continue };
+            let antes = SelectObject(mem, bmp as _);
+            BitBlt(dc, x, y, w, alto, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, antes);
+        }
+        DeleteDC(mem);
+        RestoreDC(dc, guardado);
+        ReleaseDC(h, dc);
+    }
+}
+
 /// Un clic en una tabla dibujada la abre, con el cursor al final del texto de esa celda. Devuelve si lo ha atendido.
 pub fn clic_en_tabla(h: HWND, x: i32, y: i32) -> bool {
     let a = app();
@@ -3378,7 +3697,8 @@ pub fn inicio(mayus: bool) -> bool {
 /// Intro en una línea sangrada: la nueva empieza con la misma sangría, la de espacios y tabuladores de antes del cursor.
 fn intro_sangrado(ed: HWND, s: usize) -> bool {
     let antes = editor::rango(ed, s.saturating_sub(4096), s);
-    let l = &antes[antes.iter().rposition(|&c| c == CR).map_or(0, |i| i + 1)..];
+    // Sin salto en lo leído, el principio de lo leído no es el de la línea.
+    let Some(l) = antes.iter().rposition(|&c| c == CR).map(|i| &antes[i + 1..]).or((s <= 4096).then_some(&antes[..])) else { return false };
     let n = l.iter().take_while(|&&c| c == b' ' as u16 || c == 9).count();
     if n == 0 {
         return false;
@@ -3992,9 +4312,9 @@ pub fn intro() -> bool {
     let s = s.min(t.len());
     let ini = inicio_linea(&t, s);
     let fin = fin_linea(&t, s);
-    // Dentro de un bloque de código, «- x» no es una lista.
+    // Dentro de un bloque de código, «- x» no es una lista; la sangría sí se conserva.
     if abierto_en(&t, ini).is_some() {
-        return false;
+        return intro_sangrado(ed, s);
     }
     // En una fila de tabla, en cualquier sitio y aunque haya algo seleccionado en ella (recién puesta, «Columna 1»):
     // partirla rompería la tabla.
@@ -4152,6 +4472,8 @@ pub fn celda(adelante: bool) -> bool {
 
 fn colores() {
     let a = app();
+    // Las transparentes llevan el fondo de antes.
+    soltar_imagenes();
     let noche = a.cfg.borrow().noche;
     if !a.vista.get() {
         unsafe { SetPropW(a.hwnd.get(), PROP_NOCHE.as_ptr(), (1 + noche as usize) as HANDLE) };
@@ -4508,6 +4830,23 @@ pub fn estado() {
 #[cfg(test)]
 mod pruebas {
     use super::*;
+
+    #[test]
+    fn imagenes_solo_de_este_equipo() {
+        let doc = Path::new(r"C:\notas\a.md");
+        let ruta = |s: &str| ruta_de_imagen(s, Some(doc));
+        assert_eq!(ruta("![](fotos/b%20c.png)"), Some(PathBuf::from(r"C:\notas\fotos\b c.png")));
+        assert_eq!(ruta("![](../x.jpg)"), Some(PathBuf::from(r"C:\x.jpg")));
+        assert_eq!(ruta(r"![](D:\y.gif)"), Some(PathBuf::from(r"D:\y.gif")));
+        for mala in [r"![](\\otro\c\x.png)", "![](//otro/c/x.png)", r"![](\\?\UNC\otro\c\x.png)", r"![](\\.\pipe\x.png)", "![](https://a.es/x.png)", "![](x.emf)", "![](x)"] {
+            assert_eq!(ruta(mala), None, "{mala}");
+        }
+        let en_red = Path::new(r"\\Nas\datos\a.md");
+        assert_eq!(ruta_de_imagen("![](b.png)", Some(en_red)), Some(PathBuf::from(r"\\Nas\datos\b.png")));
+        assert_eq!(ruta_de_imagen(r"![](\\nas\otra\b.png)", Some(en_red)), Some(PathBuf::from(r"\\nas\otra\b.png")));
+        assert_eq!(ruta_de_imagen(r"![](\\otro\c\b.png)", Some(en_red)), None);
+        assert_eq!(ruta_de_imagen("![](b.png)", None), None);
+    }
 
     #[test]
     fn lista_en_linea_vacia() {

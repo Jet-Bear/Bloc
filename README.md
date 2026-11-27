@@ -11,7 +11,10 @@ Windows RichEdit control.
 - `.md` files are formatted as you type (headings, lists, checklists, quotes, links, code and tables), with a
   formatting bar and the marks hidden. Ctrl+Shift+M shows them.
 - Markdown tables are drawn as a grid with a bold header. Insert them from the bar and align them with Ctrl+Shift+T.
-- Light and dark mode, also one of each at the same time in two windows.
+- A screenshot pasted with Ctrl+V into a `.md` is saved as a PNG next to the note and linked; images from the folder
+  show under their line. Files copied in File Explorer paste as links.
+- Light and dark mode, also one of each at the same time in two windows; a new window can open in the opposite color.
+- Fits in a small window: the title bar, the button bar and the status bar step aside when there is no room.
 - Find and replace, print, choose the font, the encoding and the line endings, Windows spell checker.
 - "Keep for later" when you close: the text stays as a note and comes back next time.
 - Preview of text and Markdown files in the File Explorer preview pane.
@@ -23,6 +26,8 @@ Windows RichEdit control.
 ![The same file in dark mode](docs/markdown-dark.png)
 
 ![Find in a plain text file](docs/find-light.png)
+
+![An image pasted into a Markdown note](docs/images-light.png)
 
 ## Compared with other editors
 

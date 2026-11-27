@@ -262,7 +262,13 @@ def igual(a, b):
             tiras[-1].append(x)
         else:
             tiras.append([x])
-    return len(tiras) <= 2 and all(len(t) <= 3 for t in tiras)
+    if len(tiras) <= 2 and all(len(t) <= 3 for t in tiras):
+        return True
+    # En cursiva el cursor va inclinado: movido un píxel, la diferencia es una raya inclinada de unos 8 de ancho, con
+    # uno o dos píxeles por fila.
+    x0, y0, x1, y1 = marca.getbbox()
+    filas = [sum(1 for x in range(x0, x1) if marca.getpixel((x, y))) for y in range(y0, y1)]
+    return x1 - x0 <= 10 and y1 - y0 <= 40 and max(filas) <= 4
 
 
 class SCROLLINFO(ctypes.Structure):

@@ -122,6 +122,7 @@ fn por_richedit(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if EN_RICHEDIT.with(Cell::get) == 0 && QUIETO.with(Cell::get) == 0 && SIN_ENCIMA.with(|s| s.replace(false)) {
         ventana::dibujar_rayas(h);
         ventana::dibujar_tablas(h);
+        ventana::dibujar_imagenes(h);
     }
     r
 }
@@ -626,7 +627,7 @@ fn con_seleccion<R>(h: HWND, f: impl FnOnce(Doc) -> R) -> Option<R> {
 }
 
 /// La selección con su sentido, (ancla, extremo que se mueve): EM_EXGETSEL no dice hacia dónde se alargó.
-/// ITextRange::GetStart (14) y GetEnd (16), e ITextSelection::GetFlags (58) con tomSelStartActive.
+/// ITextSelection::GetFlags (58), con tomSelStartActive.
 pub fn seleccion_con_sentido(h: HWND) -> (usize, usize) {
     type Dar = unsafe extern "system" fn(Doc, *mut i32) -> i32;
     let (s, e) = seleccion(h);
@@ -644,6 +645,23 @@ pub fn seleccionar_con_sentido(h: HWND, ancla: usize, activo: usize) {
     if con_seleccion(h, |sel| unsafe { (std::mem::transmute::<usize, Poner>(metodo(sel, 28)))(sel, ancla as i32, activo as i32) }).is_none() {
         seleccionar(h, ancla, activo);
     }
+}
+
+/// Lo de abajo de la línea en la que está `pos`, en la ventana (ITextDocument::Range, 24, e ITextRange::GetPoint, 54,
+/// con TA_BOTTOM, tomClientCoord y tomAllowOffClient): para la última línea, que no tiene otra debajo por la que medir.
+pub fn bajo_de_linea(h: HWND, pos: usize) -> Option<i32> {
+    type Rango = unsafe extern "system" fn(Doc, i32, i32, *mut Doc) -> i32;
+    type Punto = unsafe extern "system" fn(Doc, i32, *mut i32, *mut i32) -> i32;
+    con_documento(h, |doc| unsafe {
+        let mut r: Doc = std::ptr::null_mut();
+        if doc.is_null() || (std::mem::transmute::<usize, Rango>(metodo(doc, 24)))(doc, pos as i32, pos as i32, &mut r) != 0 || r.is_null() {
+            return None;
+        }
+        let (mut x, mut y) = (0, 0);
+        let bien = (std::mem::transmute::<usize, Punto>(metodo(r, 54)))(r, 8 | 0x100 | 0x200, &mut x, &mut y) == 0;
+        soltar(r);
+        bien.then_some(y)
+    })
 }
 
 /// Dónde empieza la línea a la vista en la que está `pos` (con el ajuste de línea, un párrafo tiene varias).
@@ -989,9 +1007,6 @@ pub fn colorear_fondo(h: HWND, zonas: &[(RECT, u32)], de: u32) {
     }
 }
 
-/// El texto del portapapeles. `con_formato`: si trae HTML (navegadores, Word, Outlook) con algo que Markdown sepa
-/// decir, código de un editor o una tabla con tabuladores, ya convertido; si no, el texto tal cual, que entonces ni se
-/// copia. Con `true`, lo convertido es un bloque y va en sus propias líneas.
 /// Lo que trae el portapapeles si es solo una imagen: el PNG si viene, si no el mapa de bits (CF_DIB). Con texto o con
 /// archivos, nada: lo que copia Excel o Word lleva también una imagen y se pega como texto.
 fn imagen_del_portapapeles(h: HWND) -> Option<crate::imagen::Imagen> {
@@ -1034,6 +1049,9 @@ unsafe fn archivos_copiados(d: windows_sys::Win32::Foundation::HANDLE) -> Vec<Ve
         .collect()
 }
 
+/// El texto del portapapeles. `con_formato`: si trae HTML (navegadores, Word, Outlook) con algo que Markdown sepa
+/// decir, código de un editor o una tabla con tabuladores, ya convertido; si no, el texto tal cual, que entonces ni se
+/// copia. Con `true`, lo convertido es un bloque y va en sus propias líneas.
 fn texto_del_portapapeles(h: HWND, con_formato: bool) -> Option<(Vec<u16>, bool)> {
     static HTML: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     static VSCODE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
@@ -1322,7 +1340,7 @@ fn flecha(h: HWND, wp: WPARAM, lp: LPARAM, pasar: impl FnOnce() -> LRESULT) -> L
             let ctrl = k[VK_CONTROL as usize];
             k[VK_CONTROL as usize] |= 0x80;
             SetKeyboardState(k.as_ptr());
-            DefSubclassProc(h, WM_KEYDOWN, if vk == VK_UP { VK_HOME } else { VK_END } as WPARAM, lp);
+            por_richedit(h, WM_KEYDOWN, if vk == VK_UP { VK_HOME } else { VK_END } as WPARAM, lp);
             k[VK_CONTROL as usize] = ctrl;
             SetKeyboardState(k.as_ptr());
         }
@@ -1418,6 +1436,7 @@ fn mensaje(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             } else {
                 ventana::dibujar_rayas(h);
                 ventana::dibujar_tablas(h);
+                ventana::dibujar_imagenes(h);
             }
             return r;
         }

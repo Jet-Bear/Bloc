@@ -183,6 +183,31 @@ def con_bloc(escritorio, archivo, noche, hacer):
         k32.TerminateProcess(pi.hProcess, 0)
         k32.CloseHandle(pi.hProcess); k32.CloseHandle(pi.hThread)
 
+FOTOS = """Trip photos
+===========
+
+Pasted with Ctrl+V: Bloc saves the picture next to the note and links it.
+
+![](trip%202026-11-27%2010-15-02.png)
+
+The view from the hotel[^1].
+
+[^1]: Third floor, facing the station.
+"""
+
+
+def paisaje(ruta):
+    """Un dibujo cualquiera para la nota de fotos: cielo, sol y dos colinas."""
+    from PIL import ImageDraw
+    im = Image.new("RGB", (640, 300))
+    d = ImageDraw.Draw(im)
+    for y in range(300):
+        d.line([(0, y), (640, y)], fill=(255 - y // 3, 190 - y // 4, 120 + y // 3))
+    d.ellipse((440, 50, 520, 130), fill=(255, 230, 150))
+    d.polygon([(0, 300), (0, 200), (180, 140), (360, 210), (360, 300)], fill=(70, 110, 80))
+    d.polygon([(200, 300), (420, 170), (640, 230), (640, 300)], fill=(50, 85, 65))
+    im.save(ruta)
+
 
 def trabajo():
     escritorio = u32.CreateDesktopW(ESCRITORIO, None, None, 0, 0x10000000, None)
@@ -205,6 +230,11 @@ def trabajo():
             time.sleep(0.5)
         foto(v, os.path.join(salida, "find-light.png"))
     con_bloc(escritorio, lista, 0, buscando)
+    fotos = os.path.join(dir, "trip.md")
+    with open(fotos, "w", encoding="utf-8", newline="\n") as f:
+        f.write(FOTOS)
+    paisaje(os.path.join(dir, "trip 2026-11-27 10-15-02.png"))
+    con_bloc(escritorio, fotos, 0, lambda v: (time.sleep(1.5), foto(v, os.path.join(salida, "images-light.png"))))
 
 
 hilo = threading.Thread(target=trabajo)

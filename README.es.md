@@ -12,7 +12,10 @@ el control RichEdit de Windows.
   barra de formato y las marcas ocultas. Ctrl+Mayús+M las enseña.
 - Las tablas de Markdown se dibujan como rejilla, con la cabecera en negrita. Se insertan desde la barra y se alinean
   con Ctrl+Mayús+T.
-- Modo claro y oscuro, también uno en cada ventana a la vez.
+- Una captura pegada con Ctrl+V en un `.md` se guarda como PNG junto a la nota y se enlaza; las imágenes de la
+  carpeta se ven debajo de su línea. Los archivos copiados en el Explorador se pegan como enlaces.
+- Modo claro y oscuro, también uno en cada ventana a la vez; la ventana nueva puede abrirse del color contrario.
+- Cabe en una ventana pequeña: la barra de título, la de botones y la de estado se quitan cuando no hay sitio.
 - Buscar y reemplazar, imprimir, elegir la letra, la codificación y los saltos, y el corrector de Windows.
 - «Seguir luego» al cerrar: el texto se queda como nota y vuelve la próxima vez.
 - Vista previa de los archivos de texto y Markdown en el panel de vista previa del Explorador.
@@ -24,6 +27,8 @@ el control RichEdit de Windows.
 ![El mismo archivo en modo oscuro](docs/markdown-dark.png)
 
 ![Buscar en un archivo de texto](docs/find-light.png)
+
+![Una imagen pegada en una nota de Markdown](docs/images-light.png)
 
 ## Frente a otros editores
 
